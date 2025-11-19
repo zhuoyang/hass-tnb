@@ -4,9 +4,9 @@
     "codeowners": [],
     "config_flow": true,
     "dependencies": [],
-    "documentation": "https://github.com/username/tnb-rates",
+    "documentation": "https://github.com/zhuoyang/hass-tnb",
     "iot_class": "local_polling",
-    "issue_tracker": "https://github.com/username/tnb-rates/issues",
+    "issue_tracker": "https://github.com/zhuoyang/hass-tnb/issues",
     "requirements": [
         "aiohttp"
     ],
