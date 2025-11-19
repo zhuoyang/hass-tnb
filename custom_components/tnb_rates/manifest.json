@@ -1,0 +1,14 @@
+{
+    "domain": "tnb_rates",
+    "name": "TNB Rates",
+    "codeowners": [],
+    "config_flow": true,
+    "dependencies": [],
+    "documentation": "https://github.com/username/tnb-rates",
+    "iot_class": "local_polling",
+    "issue_tracker": "https://github.com/username/tnb-rates/issues",
+    "requirements": [
+        "aiohttp"
+    ],
+    "version": "0.1.0"
+}

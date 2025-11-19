@@ -1,0 +1,37 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "TNB Rates Configuration",
+                "description": "Configure your TNB electricity tracking.",
+                "data": {
+                    "name": "Name",
+                    "import_sensor": "Import Sensor (Cumulative kWh)",
+                    "export_sensor": "Export Sensor (Cumulative kWh, Optional)",
+                    "billing_day": "Billing Cycle Reset Day (1-31)",
+                    "tariff_type": "Tariff Type",
+                    "remote_url": "Remote Rates JSON URL"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Failed to connect",
+            "invalid_auth": "Invalid authentication",
+            "unknown": "Unexpected error"
+        },
+        "abort": {
+            "already_configured": "Device is already configured"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "TNB Rates Options",
+                "data": {
+                    "remote_url": "Remote Rates JSON URL",
+                    "billing_day": "Billing Cycle Reset Day"
+                }
+            }
+        }
+    }
+}
