@@ -12,6 +12,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import callback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
@@ -114,15 +115,15 @@ class TNBRatesBaseSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
 
         # Listen to source sensors (coordinator handles the logic)
         self.async_on_remove(
-            self.hass.helpers.event.async_track_state_change_event(
-                [self._import_sensor], self._handle_import_change
+            async_track_state_change_event(
+                self.hass, [self._import_sensor], self._handle_import_change
             )
         )
         
         if self._export_sensor:
             self.async_on_remove(
-                self.hass.helpers.event.async_track_state_change_event(
-                    [self._export_sensor], self._handle_export_change
+                async_track_state_change_event(
+                    self.hass, [self._export_sensor], self._handle_export_change
                 )
             )
 
