@@ -12,38 +12,41 @@ class TestStateRestoration:
     def test_restore_state_valid_values(self, energy_tracker):
         """Test restoring state with valid values."""
         last_reset = datetime(2025, 1, 1, 0, 0, 0)
-        energy_tracker.restore_state(100.0, 200.0, 50.0, last_reset)
+        energy_tracker.restore_state(100.0, 200.0, 300.0, 50.0, last_reset)
         
         state = energy_tracker.get_state()
         assert state["peak_kwh"] == 100.0
         assert state["offpeak_kwh"] == 200.0
+        assert state["total_kwh"] == 300.0
         assert state["export_kwh"] == 50.0
         assert state["last_reset"] == last_reset
         
     def test_restore_state_clamps_negative(self, energy_tracker):
         """Test that negative values are clamped to 0."""
         last_reset = datetime(2025, 1, 1, 0, 0, 0)
-        energy_tracker.restore_state(-10.0, -20.0, -5.0, last_reset)
+        energy_tracker.restore_state(-10.0, -20.0, -30.0, -5.0, last_reset)
         
         state = energy_tracker.get_state()
         assert state["peak_kwh"] == 0.0
         assert state["offpeak_kwh"] == 0.0
+        assert state["total_kwh"] == 0.0
         assert state["export_kwh"] == 0.0
         
     def test_restore_state_clamps_excessive(self, energy_tracker):
         """Test that excessive values are clamped to 100,000."""
         last_reset = datetime(2025, 1, 1, 0, 0, 0)
-        energy_tracker.restore_state(200000.0, 150000.0, 120000.0, last_reset)
+        energy_tracker.restore_state(200000.0, 150000.0, 120000.0, 120000.0, last_reset)
         
         state = energy_tracker.get_state()
         assert state["peak_kwh"] == 100000.0
         assert state["offpeak_kwh"] == 100000.0
+        assert state["total_kwh"] == 100000.0
         assert state["export_kwh"] == 100000.0
         
     def test_restore_state_preserves_last_reset(self, energy_tracker):
         """Test that last_reset date is preserved."""
         last_reset = datetime(2025, 2, 15, 10, 30, 45)
-        energy_tracker.restore_state(50.0, 75.0, 25.0, last_reset)
+        energy_tracker.restore_state(50.0, 75.0, 100.0, 25.0, last_reset)
         
         state = energy_tracker.get_state()
         assert state["last_reset"] == last_reset
@@ -251,9 +254,10 @@ class TestProcessImportDelta:
         current_time = datetime(2025, 1, 6, 16, 0, 0)  # Monday 4pm
         energy_tracker._process_import_delta(10.0, coordinator_data, current_time)
         
-        # Standard tariff: all goes to offpeak
+        # Standard tariff: all goes to total
         assert energy_tracker._peak_kwh == 0.0
-        assert energy_tracker._offpeak_kwh == 10.0
+        assert energy_tracker._offpeak_kwh == 0.0
+        assert energy_tracker._total_kwh == 10.0
         
     def test_process_import_delta_tou_peak(self, energy_tracker_tou, coordinator_data):
         """Test ToU allocation during peak hours."""
@@ -352,6 +356,7 @@ class TestCalculateComponents:
         # Set up some usage
         energy_tracker._peak_kwh = 200.0
         energy_tracker._offpeak_kwh = 300.0
+        energy_tracker._total_kwh = 500.0
         energy_tracker._export_kwh = 100.0
         
         result = energy_tracker.calculate_components(coordinator_data)

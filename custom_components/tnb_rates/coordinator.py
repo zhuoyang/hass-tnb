@@ -41,6 +41,7 @@ class TNBEnergyTracker:
         # Energy counters
         self._peak_kwh = 0.0
         self._offpeak_kwh = 0.0
+        self._total_kwh = 0.0  # For non-ToU (Standard) tariff
         self._export_kwh = 0.0
         self._last_reset = None
         
@@ -54,18 +55,26 @@ class TNBEnergyTracker:
             self._tariff_type
         )
 
-    def restore_state(self, peak_kwh: float, offpeak_kwh: float, export_kwh: float, last_reset: datetime):
+    def restore_state(self, peak_kwh: float, offpeak_kwh: float, total_kwh: float, export_kwh: float, last_reset: datetime):
         """Restore state from persistent storage."""
         # Validate restored values (reasonable limit: < 100,000 kWh per month)
         self._peak_kwh = max(0, min(100000, peak_kwh))
         self._offpeak_kwh = max(0, min(100000, offpeak_kwh))
+        self._total_kwh = max(0, min(100000, total_kwh))
         self._export_kwh = max(0, min(100000, export_kwh))
         self._last_reset = last_reset
         
+        # Migration logic for existing non-ToU users who have data in offpeak
+        if self._tariff_type != TARIFF_TOU and self._offpeak_kwh > 0 and self._total_kwh == 0:
+            _LOGGER.info("Migrating non-ToU data from offpeak (%.2f) to total", self._offpeak_kwh)
+            self._total_kwh = self._offpeak_kwh
+            self._offpeak_kwh = 0.0
+            
         _LOGGER.info(
-            "Restored energy state: peak=%.2f kWh, offpeak=%.2f kWh, export=%.2f kWh",
+            "Restored energy state: peak=%.2f, offpeak=%.2f, total=%.2f, export=%.2f",
             self._peak_kwh,
             self._offpeak_kwh,
+            self._total_kwh,
             self._export_kwh
         )
 
@@ -143,19 +152,25 @@ class TNBEnergyTracker:
             return False
 
     def _process_import_delta(self, delta, coordinator_data, current_time=None):
-        """Allocate delta to Peak or Off-Peak based on time."""
+        """Allocate delta to Peak, Off-Peak, or Total based on tariff and time."""
         self._check_reset(current_time)
         
         if delta <= 0:
             return
 
+        # Handle Non-ToU (Standard)
+        if self._tariff_type != TARIFF_TOU:
+            self._total_kwh += delta
+            _LOGGER.debug("Added %.2f kWh to total (total: %.2f kWh)", delta, self._total_kwh)
+            return
+
+        # Handle ToU
         is_peak = False
-        if self._tariff_type == TARIFF_TOU:
-            if current_time is None:
-                current_time = dt_util.now()
-            tou_config = coordinator_data.get("tariff_a", {}).get("tou", {})
-            
-            is_peak = is_peak_time(current_time, tou_config)
+        if current_time is None:
+            current_time = dt_util.now()
+        tou_config = coordinator_data.get("tariff_a", {}).get("tou", {})
+        
+        is_peak = is_peak_time(current_time, tou_config)
         
         if is_peak:
             self._peak_kwh += delta
@@ -182,13 +197,15 @@ class TNBEnergyTracker:
                 
         if self._last_reset < current_period_start:
             _LOGGER.info(
-                "Billing cycle reset. Previous totals: peak=%.2f kWh, offpeak=%.2f kWh, export=%.2f kWh",
+                "Billing cycle reset. Previous totals: peak=%.2f, offpeak=%.2f, total=%.2f, export=%.2f",
                 self._peak_kwh,
                 self._offpeak_kwh,
+                self._total_kwh,
                 self._export_kwh
             )
             self._peak_kwh = 0.0
             self._offpeak_kwh = 0.0
+            self._total_kwh = 0.0
             self._export_kwh = 0.0
             self._last_reset = current_time
 
@@ -197,23 +214,27 @@ class TNBEnergyTracker:
         return {
             "peak_kwh": self._peak_kwh,
             "offpeak_kwh": self._offpeak_kwh,
+            "total_kwh": self._total_kwh,
             "export_kwh": self._export_kwh,
             "last_reset": self._last_reset,
         }
 
-    def set_values(self, peak_kwh=None, offpeak_kwh=None, export_kwh=None):
+    def set_values(self, peak_kwh=None, offpeak_kwh=None, total_kwh=None, export_kwh=None):
         """Manually set energy values (for corrections)."""
         if peak_kwh is not None:
             self._peak_kwh = max(0, min(100000, peak_kwh))
         if offpeak_kwh is not None:
             self._offpeak_kwh = max(0, min(100000, offpeak_kwh))
+        if total_kwh is not None:
+            self._total_kwh = max(0, min(100000, total_kwh))
         if export_kwh is not None:
             self._export_kwh = max(0, min(100000, export_kwh))
         
         _LOGGER.info(
-            "Manual override applied: peak=%.2f kWh, offpeak=%.2f kWh, export=%.2f kWh",
+            "Manual override applied: peak=%.2f, offpeak=%.2f, total=%.2f, export=%.2f",
             self._peak_kwh,
             self._offpeak_kwh,
+            self._total_kwh,
             self._export_kwh
         )
 
@@ -244,7 +265,11 @@ class TNBEnergyTracker:
         eei = data.get("eei", {})
         tax_config = data.get("tax", {})
         
-        total_import = self._peak_kwh + self._offpeak_kwh
+        # Calculate total import based on tariff type
+        if self._tariff_type == TARIFF_TOU:
+            total_import = self._peak_kwh + self._offpeak_kwh
+        else:
+            total_import = self._total_kwh
         
         # --- 1. Calculate Import Cost Components ---
         
@@ -261,11 +286,10 @@ class TNBEnergyTracker:
         capacity_rate = charges.get("capacity", 0)
         network_rate = charges.get("network", 0)
         variable_rate = capacity_rate + network_rate
-        total_variable_cost = calculate_variable_charges(
-            total_import,
-            capacity_rate,
-            network_rate
-        )
+        
+        capacity_charge = total_import * (capacity_rate / 100)
+        network_charge = total_import * (network_rate / 100)
+        total_variable_cost = capacity_charge + network_charge
         
         # Retail Charge
         retail_charge = calculate_retail_charge(total_import, charges)
@@ -300,21 +324,31 @@ class TNBEnergyTracker:
         total_import_cost = base_bill_amount + kwtbb_cost + service_tax_cost
         
         _LOGGER.debug(
-            "Import cost breakdown: energy=%.2f, variable=%.2f, retail=%.2f, afa=%.2f, eei=%.2f, kwtbb=%.2f, service_tax=%.2f, total=%.2f",
-            energy_cost, total_variable_cost, retail_charge, afa_cost, eei_rebate, kwtbb_cost, service_tax_cost, total_import_cost
+            "Import cost breakdown: energy=%.2f, capacity=%.2f, network=%.2f, retail=%.2f, afa=%.2f, eei=%.2f, kwtbb=%.2f, service_tax=%.2f, total=%.2f",
+            energy_cost, capacity_charge, network_charge, retail_charge, afa_cost, eei_rebate, kwtbb_cost, service_tax_cost, total_import_cost
         )
         
         # --- 2. Calculate Export Credit ---
         
+        # Calculate EEI rate for export (same tiered structure as import)
+        # EEI rebate is negative, so for export we need to deduct it (reduce the credit)
+        eei_export_rebate = calculate_eei_rebate(self._export_kwh, eei)
+        # Convert rebate to rate: rebate = kwh * (rate/100), so rate = (rebate * 100) / kwh
+        eei_export_rate = 0.0
+        if self._export_kwh > 0:
+            eei_export_rate = (eei_export_rebate * 100) / self._export_kwh
+        
         credit_value, matched_peak, matched_offpeak, excess_export = calculate_export_credit(
             self._peak_kwh,
             self._offpeak_kwh,
+            self._total_kwh,
             self._export_kwh,
             peak_rate,
             offpeak_rate,
             variable_rate,
             self._tariff_type,
-            rate
+            rate,
+            eei_export_rate
         )
         
         _LOGGER.debug(
@@ -324,6 +358,14 @@ class TNBEnergyTracker:
         
         return {
             "import_cost": total_import_cost,
+            "energy_cost": energy_cost,
+            "capacity_charge": capacity_charge,
+            "network_charge": network_charge,
+            "retail_charge": retail_charge,
+            "afa_cost": afa_cost,
+            "eei_rebate": eei_rebate,
+            "kwtbb_tax": kwtbb_cost,
+            "service_tax": service_tax_cost,
             "export_credit": credit_value,
             "excess_export_kwh": excess_export,
             "net_bill": max(total_import_cost - credit_value, 0.0)

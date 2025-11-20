@@ -304,12 +304,14 @@ def calculate_service_tax(
 def calculate_export_credit(
     peak_kwh: float,
     offpeak_kwh: float,
+    total_kwh: float,
     export_kwh: float,
     peak_rate: float,
     offpeak_rate: float,
     variable_rate: float,
     tariff_type: str,
-    rate: float = 0.0
+    rate: float = 0.0,
+    eei_rate: float = 0.0
 ) -> Tuple[float, float, float, float]:
     """
     Calculate export credit using peak-first offset algorithm.
@@ -319,45 +321,67 @@ def calculate_export_credit(
     2. Off-peak energy
     3. Remaining export becomes excess
     
+    For Non-ToU:
+    1. Total energy
+    2. Remaining export becomes excess
+    
     Args:
         peak_kwh: Peak period import energy
         offpeak_kwh: Off-peak period import energy
+        total_kwh: Total import energy (for non-ToU)
         export_kwh: Total export energy
         peak_rate: Peak energy rate (sen/kWh)
         offpeak_rate: Off-peak energy rate (sen/kWh)
         variable_rate: Variable charges rate (capacity + network, sen/kWh)
         tariff_type: Either TARIFF_TOU or TARIFF_STANDARD
         rate: Standard tariff rate (sen/kWh), used only if not ToU
+        eei_rate: EEI rate (sen/kWh), typically negative. Added to rate to reduce credit.
         
     Returns:
         Tuple of (credit_value, matched_peak, matched_offpeak, excess_export)
+        For non-ToU, matched_peak will contain the matched total amount for simplicity in return signature,
+        or we could add a matched_total return. Let's use matched_peak + matched_offpeak = matched_total.
     """
     matched_peak = 0.0
     matched_offpeak = 0.0
     remaining_export = export_kwh
     
-    # Offset Peak First (highest value energy)
-    if peak_kwh > 0:
-        matched_peak = min(remaining_export, peak_kwh)
-        remaining_export -= matched_peak
-        
-    # Offset Off-peak Second
-    if offpeak_kwh > 0:
-        matched_offpeak = min(remaining_export, offpeak_kwh)
-        remaining_export -= matched_offpeak
-        
-    excess_export = remaining_export
-    
-    # Calculate Credit Value (energy rate + variable charges)
-    credit_value = 0.0
-    
     if tariff_type == TARIFF_TOU:
-        # Use peak/offpeak rates
+        # Offset Peak First (highest value energy)
+        if peak_kwh > 0:
+            matched_peak = min(remaining_export, peak_kwh)
+            remaining_export -= matched_peak
+            
+        # Offset Off-peak Second
+        if offpeak_kwh > 0:
+            matched_offpeak = min(remaining_export, offpeak_kwh)
+            remaining_export -= matched_offpeak
+            
+        excess_export = remaining_export
+        
+        # Calculate Credit Value (energy rate + variable charges + eei_rate)
+        # eei_rate is typically negative, so adding it reduces the credit
         credit_value = (
-            matched_peak * ((peak_rate + variable_rate) / 100) +
-            matched_offpeak * ((offpeak_rate + variable_rate) / 100)
+            matched_peak * ((peak_rate + variable_rate + eei_rate) / 100) +
+            matched_offpeak * ((offpeak_rate + variable_rate + eei_rate) / 100)
         )
     else:
-        # Standard Tariff: use single rate
-        credit_value = (matched_peak + matched_offpeak) * ((rate + variable_rate) / 100)
+        # Standard Tariff
+        matched_total = 0.0
+        if total_kwh > 0:
+            matched_total = min(remaining_export, total_kwh)
+            remaining_export -= matched_total
+            
+        excess_export = remaining_export
+        
+        # For standard tariff, we can just return matched_total as matched_peak or split it?
+        # The return signature expects matched_peak and matched_offpeak.
+        # Let's just put it in matched_peak for now as a placeholder, or better, 
+        # since the caller might use these values, we should be careful.
+        # But looking at coordinator.py, it just logs them.
+        # Let's assign to matched_peak to indicate "matched energy".
+        matched_peak = matched_total
+        
+        credit_value = matched_total * ((rate + variable_rate + eei_rate) / 100)
+
     return (credit_value, matched_peak, matched_offpeak, excess_export)

@@ -15,8 +15,8 @@ TARIFF_TOU = "Time of Use"
 # Sensor reset detection threshold (kWh)
 SENSOR_RESET_THRESHOLD = 10.0
 
-# Default Remote URL (Placeholder - User should update this)
-DEFAULT_REMOTE_URL = "https://raw.githubusercontent.com/username/tnb-rates/main/rates.json"
+# Default Remote URL
+DEFAULT_REMOTE_URL = "https://raw.githubusercontent.com/zhuoyang/hass-tnb/main/rates.json"
 
 # Services
 SERVICE_SET_ENERGY_VALUES = "set_energy_values"

@@ -360,13 +360,14 @@ class TestExportCredit:
         """Test that peak energy is offset before offpeak."""
         peak_kwh = 100.0
         offpeak_kwh = 200.0
+        total_kwh = 300.0
         export_kwh = 150.0
         peak_rate = 50.0
         offpeak_rate = 30.0
         variable_rate = 15.0
         
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
-            peak_kwh, offpeak_kwh, export_kwh,
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
             peak_rate, offpeak_rate, variable_rate,
             TARIFF_TOU
         )
@@ -381,13 +382,14 @@ class TestExportCredit:
         """Test export less than total import."""
         peak_kwh = 100.0
         offpeak_kwh = 200.0
+        total_kwh = 300.0
         export_kwh = 50.0
         peak_rate = 50.0
         offpeak_rate = 30.0
         variable_rate = 15.0
         
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
-            peak_kwh, offpeak_kwh, export_kwh,
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
             peak_rate, offpeak_rate, variable_rate,
             TARIFF_TOU
         )
@@ -401,13 +403,14 @@ class TestExportCredit:
         """Test export greater than total import."""
         peak_kwh = 100.0
         offpeak_kwh = 200.0
+        total_kwh = 300.0
         export_kwh = 400.0
         peak_rate = 50.0
         offpeak_rate = 30.0
         variable_rate = 15.0
         
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
-            peak_kwh, offpeak_kwh, export_kwh,
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
             peak_rate, offpeak_rate, variable_rate,
             TARIFF_TOU
         )
@@ -421,13 +424,14 @@ class TestExportCredit:
         """Test export credit value calculation for ToU."""
         peak_kwh = 100.0
         offpeak_kwh = 0.0
+        total_kwh = 100.0
         export_kwh = 100.0
         peak_rate = 40.0  # sen/kWh
         offpeak_rate = 20.0
         variable_rate = 10.0  # sen/kWh
         
         credit, _, _, _ = calculate_export_credit(
-            peak_kwh, offpeak_kwh, export_kwh,
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
             peak_rate, offpeak_rate, variable_rate,
             TARIFF_TOU
         )
@@ -438,24 +442,27 @@ class TestExportCredit:
     def test_export_credit_value_standard(self):
         """Test export credit value calculation for standard tariff."""
         peak_kwh = 0.0
-        offpeak_kwh = 100.0
+        offpeak_kwh = 0.0
+        total_kwh = 100.0
         export_kwh = 100.0
         rate = 30.0  # sen/kWh
         variable_rate = 10.0  # sen/kWh
         
-        credit, _, _, _ = calculate_export_credit(
-            peak_kwh, offpeak_kwh, export_kwh,
+        credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
             0, 0, variable_rate,
             TARIFF_STANDARD, rate
         )
         
         # Credit = 100 * (30 + 10) / 100 = 40 RM
         assert credit == pytest.approx(40.0, rel=1e-2)
+        assert matched_peak == 100.0 # matched_peak holds total matched for standard
+        assert excess == 0.0
         
     def test_zero_export(self):
         """Test with no export energy."""
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
-            100.0, 200.0, 0.0,
+            100.0, 200.0, 300.0, 0.0,
             50.0, 30.0, 15.0,
             TARIFF_TOU
         )
@@ -465,21 +472,143 @@ class TestExportCredit:
         assert excess == 0.0
         assert credit == 0.0
 
+    def test_non_tou_export_partial(self):
+        """Test Non-ToU export credit with partial offset."""
+        peak_kwh = 0.0
+        offpeak_kwh = 0.0
+        total_kwh = 500.0
+        export_kwh = 200.0
+        rate = 21.8  # sen/kWh
+        variable_rate = 15.0
+        
+        credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
+            0, 0, variable_rate,
+            TARIFF_STANDARD, rate
+        )
+        
+        assert matched_peak == 200.0 # matched_peak holds total matched
+        assert excess == 0.0
+        # Credit = 200 * (21.8 + 15.0) / 100 = 73.6 RM
+        assert credit == pytest.approx(73.6, rel=1e-2)
+
+    def test_non_tou_export_excess(self):
+        """Test Non-ToU export credit with excess."""
+        peak_kwh = 0.0
+        offpeak_kwh = 0.0
+        total_kwh = 200.0
+        export_kwh = 300.0
+        rate = 21.8
+        variable_rate = 15.0
+        
+        credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
+            0, 0, variable_rate,
+            TARIFF_STANDARD, rate
+        )
+        
+        assert matched_peak == 200.0
+        assert excess == 100.0
+        # Credit = 200 * (21.8 + 15.0) / 100 = 73.6 RM
+        assert credit == pytest.approx(73.6, rel=1e-2)
+
+    def test_export_credit_with_eei_deduction_tou(self):
+        """Test that EEI rate is deducted from export credit for ToU tariff."""
+        peak_kwh = 100.0
+        offpeak_kwh = 200.0
+        total_kwh = 300.0
+        export_kwh = 150.0
+        peak_rate = 50.0  # sen/kWh
+        offpeak_rate = 30.0  # sen/kWh
+        variable_rate = 15.0  # sen/kWh
+        eei_rate = -5.0  # -5 sen/kWh (negative rebate, reduces credit)
+        
+        # Calculate without EEI
+        credit_no_eei, _, _, _ = calculate_export_credit(
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
+            peak_rate, offpeak_rate, variable_rate,
+            TARIFF_TOU, 0, 0.0
+        )
+        
+        # Calculate with EEI
+        credit_with_eei, matched_peak, matched_offpeak, excess = calculate_export_credit(
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
+            peak_rate, offpeak_rate, variable_rate,
+            TARIFF_TOU, 0, eei_rate
+        )
+        
+        # Should offset all peak (100) first, then 50 from offpeak
+        assert matched_peak == 100.0
+        assert matched_offpeak == 50.0
+        assert excess == 0.0
+        
+        # Credit without EEI = 100*(50+15)/100 + 50*(30+15)/100 = 65 + 22.5 = 87.5
+        assert credit_no_eei == pytest.approx(87.5, rel=1e-2)
+        
+        # Credit with EEI = 100*(50+15-5)/100 + 50*(30+15-5)/100 = 60 + 20 = 80
+        assert credit_with_eei == pytest.approx(80.0, rel=1e-2)
+        
+        # EEI should reduce credit by RM 7.5
+        assert credit_with_eei < credit_no_eei
+        assert (credit_no_eei - credit_with_eei) == pytest.approx(7.5, rel=1e-2)
+
+    def test_export_credit_with_eei_deduction_standard(self):
+        """Test that EEI rate is deducted from export credit for standard tariff."""
+        peak_kwh = 0.0
+        offpeak_kwh = 0.0
+        total_kwh = 500.0
+        export_kwh = 200.0
+        rate = 30.0  # sen/kWh
+        variable_rate = 17.4  # sen/kWh (4.55 + 12.85)
+        eei_rate = -10.0  # -10 sen/kWh (negative rebate)
+        
+        # Calculate without EEI
+        credit_no_eei, _, _, _ = calculate_export_credit(
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
+            0, 0, variable_rate,
+            TARIFF_STANDARD, rate, 0.0
+        )
+        
+        # Calculate with EEI
+        credit_with_eei, matched_peak, _, excess = calculate_export_credit(
+            peak_kwh, offpeak_kwh, total_kwh, export_kwh,
+            0, 0, variable_rate,
+            TARIFF_STANDARD, rate, eei_rate
+        )
+        
+        assert matched_peak == 200.0  # matched_peak holds total matched for standard
+        assert excess == 0.0
+        
+        # Credit without EEI = 200 * (30 + 17.4) / 100 = 94.8 RM
+        assert credit_no_eei == pytest.approx(94.8, rel=1e-2)
+        
+        # Credit with EEI = 200 * (30 + 17.4 - 10) / 100 = 74.8 RM
+        assert credit_with_eei == pytest.approx(74.8, rel=1e-2)
+        
+        # EEI should reduce credit by RM 20.0
+        assert credit_with_eei < credit_no_eei
+        assert (credit_no_eei - credit_with_eei) == pytest.approx(20.0, rel=1e-2)
+
+
 
 class TestRealBillVerification:
     """Test calculations against real TNB bill from January 2025."""
     
     def test_bill_january_2025(self):
         """
-        Verify calculations against actual TNB bill.
+        Verify calculations against actual TNB bill with NEM export.
         
-        Bill details:
+        Import (Gross) usage:
         - Peak usage: 160 kWh
         - Off-peak usage: 798 kWh
-        - Total usage: 958 kWh
-        - Tariff: ToU (E1 Enhanced ToU)
+        - Total gross import: 958 kWh
         
-        Expected charges:
+        Export data (from Kredit NEM):
+        - Peak export: 160 kWh (credit: RM45.63 @ RM0.2852/kWh)
+        - Off-peak export: 344 kWh (credit: RM84.04 @ RM0.2443/kWh)
+        - Total export: 504 kWh
+        
+        Expected import charges (before NEM offset):
         - Peak energy: RM 45.63 (160 kWh @ RM0.2852/kWh)
         - Off-peak energy: RM 194.95 (798 kWh @ RM0.2443/kWh)
         - Total energy: RM 240.58
@@ -487,15 +616,32 @@ class TestRealBillVerification:
         - Network: RM 123.10 (958 kWh @ RM0.1285/kWh)
         - AFA rebate: -RM 62.27 (958 kWh @ -RM0.065/kWh)
         - Retail: RM 10.00
-        - EEI rebate: -RM 4.79 (958 kWh @ -RM0.005/kWh)
+        - EEI rebate (import): -RM 4.79 (958 kWh @ -RM0.005/kWh)
         - Base bill: RM 350.21 (before tax)
-        - Service Tax (8%): RM 10.78 (on RM134.69 taxable portion)
-        - KWTBB (1.6%): RM 6.44 (on RM350.21)
+        - Service Tax (8%): RM 10.78
+        - KWTBB (1.6%): RM 6.44
+        - Total before NEM: RM 367.43
+        
+        NEM Export Credits:
+        - Peak energy credit: RM 45.63 (160 kWh @ RM0.2852/kWh)
+        - Off-peak energy credit: RM 84.04 (344 kWh @ RM0.2443/kWh)
+        - Capacity credit: RM 22.93 (504 kWh @ RM0.0455/kWh)
+        - Network credit: RM 64.76 (504 kWh @ RM0.1285/kWh)
+        - Subtotal NEM credit: RM 217.36
+        - Pelarasan Insentif (EEI deduction): +RM 2.52 (504 kWh @ RM0.005/kWh)
+        - Net NEM credit: RM 214.84
+        
+        Final bill: RM 367.43 - RM 214.84 = RM 152.59
         """
-        # Usage data
+        # Import usage data
         peak_kwh = 160.0
         offpeak_kwh = 798.0
         total_kwh = 958.0
+        
+        # Export data
+        export_kwh = 504.0
+        export_peak_kwh = 160.0  # Matched all peak import
+        export_offpeak_kwh = 344.0  # Matched 344 out of 798 offpeak
         
         # Tariff configuration (E1 Enhanced ToU for 901-1500 kWh tier)
         tariff = {
@@ -536,6 +682,8 @@ class TestRealBillVerification:
             "rate": 1.6,
         }
         
+        # === IMPORT COST CALCULATION ===
+        
         # Step 1: Energy cost
         energy_cost, peak_rate, offpeak_rate, _ = calculate_energy_cost(
             peak_kwh, offpeak_kwh, total_kwh, tariff, TARIFF_TOU
@@ -570,36 +718,84 @@ class TestRealBillVerification:
         retail_charge = calculate_retail_charge(total_kwh, tariff)
         assert retail_charge == pytest.approx(10.00, rel=1e-2)
         
-        # Step 5: EEI rebate
-        eei_rebate = calculate_eei_rebate(total_kwh, eei_config)
-        assert eei_rebate == pytest.approx(-4.79, rel=1e-2)
+        # Step 5: EEI rebate (for import)
+        eei_rebate_import = calculate_eei_rebate(total_kwh, eei_config)
+        assert eei_rebate_import == pytest.approx(-4.79, rel=1e-2)
         
         # Step 6: Base bill (before tax)
-        # Note: Base bill for display includes all charges
-        base_bill = energy_cost + variable_charges + afa_charge + retail_charge + eei_rebate
+        base_bill = energy_cost + variable_charges + afa_charge + retail_charge + eei_rebate_import
         assert base_bill == pytest.approx(350.21, abs=0.02)
         
         # Step 7: KWTBB tax (1.6%)
-        # KWTBB is calculated on energy-related charges only (Energy + Variable + EEI)
-        # It excludes Retail and AFA charges
-        kwtbb_base = energy_cost + variable_charges + eei_rebate
+        kwtbb_base = energy_cost + variable_charges + eei_rebate_import
         kwtbb_tax = calculate_kwtbb_tax(total_kwh, kwtbb_base, kwtbb_config)
         assert kwtbb_tax == pytest.approx(6.44, abs=0.01)
         
         # Step 8: Service tax (8% on taxable portion)
-        # For 958 kWh with 600 kWh exemption:
-        # Taxable ratio = (958 - 600) / 958 = 358 / 958 = 0.3737
-        # Taxable amount = 350.21 * 0.3737 = 130.89 (approximately 134.69 from bill)
-        # Note: Bill shows RM134.69 which suggests slight rounding differences
         service_tax = calculate_service_tax(total_kwh, base_bill, service_tax_config)
-        
-        # The expected service tax is 8% of the taxable portion
-        # Bill shows RM10.78, which equals 8% of RM134.69
         assert service_tax == pytest.approx(10.78, abs=0.5)
         
         # Step 9: Total bill before NEM credits
         total_before_nem = base_bill + service_tax + kwtbb_tax
-        assert total_before_nem == pytest.approx(367.43, abs=1.0)
+        assert total_before_nem == pytest.approx(367.43, abs=0.5)
         
-        # Note: The final bill of RM152.59 includes NEM credits which are calculated
-        # separately based on export data not shown in this portion of the bill
+        # === NEM EXPORT CREDIT CALCULATION ===
+        
+        # Calculate EEI rate for export
+        eei_export_rebate = calculate_eei_rebate(export_kwh, eei_config)
+        eei_export_rate = 0.0
+        if export_kwh > 0:
+            eei_export_rate = (eei_export_rebate * 100) / export_kwh
+        
+        # EEI deduction (Pelarasan Insentif)
+        # This is the absolute value of the EEI rebate for export (positive charge)
+        pelarasan_insentif = abs(eei_export_rebate)
+        assert pelarasan_insentif == pytest.approx(2.52, abs=0.02)
+        
+        # Calculate export credit
+        variable_rate = tariff["capacity_rate"] + tariff["network_rate"]
+        credit_value, matched_peak, matched_offpeak, excess_export = calculate_export_credit(
+            peak_kwh,
+            offpeak_kwh,
+            total_kwh,
+            export_kwh,
+            peak_rate,
+            offpeak_rate,
+            variable_rate,
+            TARIFF_TOU,
+            0.0,
+            eei_export_rate
+        )
+        
+        # Verify export matching (peak-first algorithm)
+        assert matched_peak == 160.0  # All peak import offset
+        assert matched_offpeak == 344.0  # 344 out of 798 offpeak offset
+        assert excess_export == 0.0  # No excess export
+        
+        # Verify individual export credit components
+        peak_export_credit = export_peak_kwh * (peak_rate / 100)
+        offpeak_export_credit = export_offpeak_kwh * (offpeak_rate / 100)
+        capacity_export_credit = export_kwh * (tariff["capacity_rate"] / 100)
+        network_export_credit = export_kwh * (tariff["network_rate"] / 100)
+        
+        assert peak_export_credit == pytest.approx(45.63, abs=0.02)
+        assert offpeak_export_credit == pytest.approx(84.04, abs=0.02)
+        assert capacity_export_credit == pytest.approx(22.93, abs=0.02)
+        assert network_export_credit == pytest.approx(64.76, abs=0.02)
+        
+        # Total credit before EEI deduction
+        total_credit_before_eei = (peak_export_credit + offpeak_export_credit + 
+                                   capacity_export_credit + network_export_credit)
+        assert total_credit_before_eei == pytest.approx(217.36, abs=0.1)
+        
+        # Net credit after EEI deduction
+        net_nem_credit = credit_value
+        assert net_nem_credit == pytest.approx(214.84, abs=0.1)
+        
+        # Verify the credit matches: total_credit_before_eei - pelarasan_insentif
+        assert net_nem_credit == pytest.approx(total_credit_before_eei - pelarasan_insentif, abs=0.1)
+        
+        # Step 10: Final bill
+        final_bill = total_before_nem - net_nem_credit
+        assert final_bill == pytest.approx(152.59, abs=0.5)
+

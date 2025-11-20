@@ -42,12 +42,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         """Handle the set_energy_values service call."""
         peak_kwh = call.data.get("peak_kwh")
         offpeak_kwh = call.data.get("offpeak_kwh")
+        total_kwh = call.data.get("total_kwh")
         export_kwh = call.data.get("export_kwh")
         
         # Get coordinator for all config entries and update
         for entry_id, coordinator_instance in hass.data[DOMAIN].items():
             if hasattr(coordinator_instance, 'energy_tracker') and coordinator_instance.energy_tracker:
-                coordinator_instance.energy_tracker.set_values(peak_kwh, offpeak_kwh, export_kwh)
+                coordinator_instance.energy_tracker.set_values(peak_kwh, offpeak_kwh, total_kwh, export_kwh)
                 coordinator_instance.async_update_listeners()
                 _LOGGER.info("Energy values updated for entry %s", entry_id)
     
@@ -101,6 +102,7 @@ class TNBRatesBaseSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
             if (last_state := await self.async_get_last_state()) is not None:
                 peak_kwh = float(last_state.attributes.get("current_month_peak_kwh", 0))
                 offpeak_kwh = float(last_state.attributes.get("current_month_offpeak_kwh", 0))
+                total_kwh = float(last_state.attributes.get("current_month_total_kwh", 0))
                 export_kwh = float(last_state.attributes.get("current_month_export_kwh", 0))
                 last_reset = None
                 if last_reset_str := last_state.attributes.get("last_reset"):
@@ -108,7 +110,7 @@ class TNBRatesBaseSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
                 
                 if last_reset:
                     self.coordinator.energy_tracker.restore_state(
-                        peak_kwh, offpeak_kwh, export_kwh, last_reset
+                        peak_kwh, offpeak_kwh, total_kwh, export_kwh, last_reset
                     )
                     self._state_restored = True
                     _LOGGER.info("State restored from %s", self.entity_id)
@@ -165,6 +167,7 @@ class TNBRatesBaseSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
         return {
             "current_month_peak_kwh": round(state["peak_kwh"], 2),
             "current_month_offpeak_kwh": round(state["offpeak_kwh"], 2),
+            "current_month_total_kwh": round(state["total_kwh"], 2),
             "current_month_export_kwh": round(state["export_kwh"], 2),
             "last_reset": state["last_reset"].isoformat() if state["last_reset"] else None,
         }
@@ -194,6 +197,26 @@ class TNBRatesBillSensor(TNBRatesBaseSensor):
         """Return the net bill value."""
         components = self._get_components()
         return round(components.get("net_bill", 0.0), 2)
+
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        attrs = super().extra_state_attributes
+        components = self._get_components()
+        
+        attrs.update({
+            "energy_cost": round(components.get("energy_cost", 0.0), 2),
+            "capacity_charge": round(components.get("capacity_charge", 0.0), 2),
+            "network_charge": round(components.get("network_charge", 0.0), 2),
+            "retail_charge": round(components.get("retail_charge", 0.0), 2),
+            "afa_cost": round(components.get("afa_cost", 0.0), 2),
+            "eei_rebate": round(components.get("eei_rebate", 0.0), 2),
+            "kwtbb_tax": round(components.get("kwtbb_tax", 0.0), 2),
+            "service_tax": round(components.get("service_tax", 0.0), 2),
+            "total_import_cost": round(components.get("import_cost", 0.0), 2),
+            "total_export_credit": round(components.get("export_credit", 0.0), 2),
+        })
+        return attrs
 
 
 class TNBRatesImportCostSensor(TNBRatesBaseSensor):
