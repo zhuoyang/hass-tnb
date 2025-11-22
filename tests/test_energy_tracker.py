@@ -1,6 +1,7 @@
 """Tests for TNBEnergyTracker class in coordinator module."""
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from custom_components.tnb_rates.coordinator import TNBEnergyTracker
 from custom_components.tnb_rates.const import SENSOR_RESET_THRESHOLD
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
@@ -52,90 +53,130 @@ class TestStateRestoration:
         assert state["last_reset"] == last_reset
 
 
+class TestSetMethods:
+    """Test set_peak_kwh, set_offpeak_kwh, set_total_kwh methods."""
+    
+    def test_set_peak_kwh_tou_updates_total(self, energy_tracker_tou):
+        """Test that setting peak kWh in ToU mode updates total after reconciliation."""
+        energy_tracker_tou.set_offpeak_kwh(5.0)
+        energy_tracker_tou.set_peak_kwh(10.0)
+        energy_tracker_tou.reconcile_tou_total()  # Explicitly reconcile after setting values
+        
+        assert energy_tracker_tou._peak_kwh == Decimal("10.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("5.0")
+        assert energy_tracker_tou._total_kwh == Decimal("15.0")  # Should be recalculated
+        
+    def test_set_offpeak_kwh_tou_updates_total(self, energy_tracker_tou):
+        """Test that setting offpeak kWh in ToU mode updates total after reconciliation."""
+        energy_tracker_tou.set_peak_kwh(10.0)
+        energy_tracker_tou.set_offpeak_kwh(5.0)
+        energy_tracker_tou.reconcile_tou_total()  # Explicitly reconcile after setting values
+        
+        assert energy_tracker_tou._peak_kwh == Decimal("10.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("5.0")
+        assert energy_tracker_tou._total_kwh == Decimal("15.0")  # Should be recalculated
+        
+    def test_set_peak_kwh_standard_no_effect_on_total(self, energy_tracker):
+        """Test that setting peak kWh in standard mode doesn't affect total."""
+        energy_tracker.set_total_kwh(100.0)
+        energy_tracker.set_peak_kwh(10.0)
+        
+        assert energy_tracker._peak_kwh == Decimal("10.0")
+        assert energy_tracker._total_kwh == Decimal("100.0")  # Should remain unchanged
+        
+    def test_set_total_kwh_standard(self, energy_tracker):
+        """Test that setting total kWh in standard mode works correctly."""
+        energy_tracker.set_total_kwh(100.0)
+        
+        assert energy_tracker._total_kwh == Decimal("100.0")
+
+
 class TestBillingCycleReset:
     """Test billing cycle reset logic."""
     
     def test_check_reset_first_call(self, energy_tracker):
         """Test that first call sets last_reset without resetting counters."""
-        energy_tracker._peak_kwh = 100.0
-        energy_tracker._offpeak_kwh = 200.0
-        energy_tracker._export_kwh = 50.0
+    def test_check_reset_first_call(self, energy_tracker):
+        """Test that first call sets last_reset without resetting counters."""
+        energy_tracker._peak_kwh = Decimal("100.0")
+        energy_tracker._offpeak_kwh = Decimal("200.0")
+        energy_tracker._export_kwh = Decimal("50.0")
         
         current_time = datetime(2025, 1, 15, 12, 0, 0)
         energy_tracker._check_reset(current_time)
         
         # Should set last_reset but not reset counters
         assert energy_tracker._last_reset == current_time
-        assert energy_tracker._peak_kwh == 100.0
-        assert energy_tracker._offpeak_kwh == 200.0
-        assert energy_tracker._export_kwh == 50.0
+        assert energy_tracker._peak_kwh == Decimal("100.0")
+        assert energy_tracker._offpeak_kwh == Decimal("200.0")
+        assert energy_tracker._export_kwh == Decimal("50.0")
         
     def test_check_reset_within_period(self, energy_tracker):
         """Test that no reset occurs within billing period."""
         energy_tracker._billing_day = 1
         energy_tracker._last_reset = datetime(2025, 1, 5, 0, 0, 0)
-        energy_tracker._peak_kwh = 100.0
-        energy_tracker._offpeak_kwh = 200.0
-        energy_tracker._export_kwh = 50.0
+        energy_tracker._peak_kwh = Decimal("100.0")
+        energy_tracker._offpeak_kwh = Decimal("200.0")
+        energy_tracker._export_kwh = Decimal("50.0")
         
         # Still within January billing period
         current_time = datetime(2025, 1, 20, 12, 0, 0)
         energy_tracker._check_reset(current_time)
         
         # Should not reset counters
-        assert energy_tracker._peak_kwh == 100.0
-        assert energy_tracker._offpeak_kwh == 200.0
-        assert energy_tracker._export_kwh == 50.0
+        assert energy_tracker._peak_kwh == Decimal("100.0")
+        assert energy_tracker._offpeak_kwh == Decimal("200.0")
+        assert energy_tracker._export_kwh == Decimal("50.0")
         
     def test_check_reset_new_period(self, energy_tracker):
         """Test that counters reset on new billing period."""
         energy_tracker._billing_day = 1
         energy_tracker._last_reset = datetime(2025, 1, 5, 0, 0, 0)
-        energy_tracker._peak_kwh = 100.0
-        energy_tracker._offpeak_kwh = 200.0
-        energy_tracker._export_kwh = 50.0
+        energy_tracker._peak_kwh = Decimal("100.0")
+        energy_tracker._offpeak_kwh = Decimal("200.0")
+        energy_tracker._export_kwh = Decimal("50.0")
         
         # New billing period (February 2nd)
         current_time = datetime(2025, 2, 2, 12, 0, 0)
         energy_tracker._check_reset(current_time)
         
         # Should reset all counters
-        assert energy_tracker._peak_kwh == 0.0
-        assert energy_tracker._offpeak_kwh == 0.0
-        assert energy_tracker._export_kwh == 0.0
+        assert energy_tracker._peak_kwh == Decimal("0.0")
+        assert energy_tracker._offpeak_kwh == Decimal("0.0")
+        assert energy_tracker._export_kwh == Decimal("0.0")
         assert energy_tracker._last_reset == current_time
         
     def test_check_reset_billing_day_boundary(self, energy_tracker):
         """Test reset exactly on billing day."""
         energy_tracker._billing_day = 15
         energy_tracker._last_reset = datetime(2025, 1, 16, 0, 0, 0)
-        energy_tracker._peak_kwh = 100.0
+        energy_tracker._peak_kwh = Decimal("100.0")
         
         # Exactly on billing day 15th
         current_time = datetime(2025, 2, 15, 0, 0, 0)
         energy_tracker._check_reset(current_time)
         
         # Should reset
-        assert energy_tracker._peak_kwh == 0.0
+        assert energy_tracker._peak_kwh == Decimal("0.0")
         
     def test_check_reset_month_wrap(self, energy_tracker):
         """Test reset at month boundary."""
         energy_tracker._billing_day = 1
         energy_tracker._last_reset = datetime(2024, 12, 5, 0, 0, 0)
-        energy_tracker._peak_kwh = 100.0
+        energy_tracker._peak_kwh = Decimal("100.0")
         
         # January (next billing period)
         current_time = datetime(2025, 1, 2, 12, 0, 0)
         energy_tracker._check_reset(current_time)
         
         # Should reset
-        assert energy_tracker._peak_kwh == 0.0
+        assert energy_tracker._peak_kwh == Decimal("0.0")
         
     def test_check_reset_before_billing_day(self, energy_tracker):
         """Test reset logic when current day is before billing day."""
         energy_tracker._billing_day = 15
         energy_tracker._last_reset = datetime(2024, 12, 20, 0, 0, 0)
-        energy_tracker._peak_kwh = 100.0
+        energy_tracker._peak_kwh = Decimal("100.0")
         
         # January 5th (before billing day 15th, so period started Dec 15th)
         current_time = datetime(2025, 1, 5, 12, 0, 0)
@@ -143,7 +184,7 @@ class TestBillingCycleReset:
         
         # Should NOT reset because we're still in the Dec 15 - Jan 14 period
         # last_reset (Dec 20) is after period start (Dec 15), so we're in current period
-        assert energy_tracker._peak_kwh == 100.0
+        assert energy_tracker._peak_kwh == Decimal("100.0")
 
 
 class TestSensorResetDetection:
@@ -187,14 +228,14 @@ class TestSensorResetDetection:
         
     def test_import_sensor_unexpected_decrease(self, energy_tracker_tou, coordinator_data, mock_state_factory):
         """Test unexpected decrease (new value >= threshold but < old)."""
-        energy_tracker_tou._peak_kwh = 100.0
+        energy_tracker_tou._peak_kwh = Decimal("100.0")
         old_state = mock_state_factory(1000.0)
         new_state = mock_state_factory(900.0)  # Decrease but >= threshold
         
         energy_tracker_tou.handle_import_change(new_state, old_state, coordinator_data)
         
         # Should ignore the decrease, counters unchanged
-        assert energy_tracker_tou._peak_kwh == 100.0
+        assert energy_tracker_tou._peak_kwh == Decimal("100.0")
         
     @pytest.mark.skip(reason="Requires full Home Assistant @callback decorator support")
     def test_export_sensor_reset_detected(self, energy_tracker, mock_state_factory):
@@ -252,73 +293,94 @@ class TestProcessImportDelta:
     def test_process_import_delta_standard_tariff(self, energy_tracker, coordinator_data):
         """Test that standard tariff allocates all to offpeak."""
         current_time = datetime(2025, 1, 6, 16, 0, 0)  # Monday 4pm
-        energy_tracker._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
         # Standard tariff: all goes to total
-        assert energy_tracker._peak_kwh == 0.0
-        assert energy_tracker._offpeak_kwh == 0.0
-        assert energy_tracker._total_kwh == 10.0
+        assert energy_tracker._peak_kwh == Decimal("0.0")
+        assert energy_tracker._offpeak_kwh == Decimal("0.0")
+        assert energy_tracker._total_kwh == Decimal("10.0")
         
     def test_process_import_delta_tou_peak(self, energy_tracker_tou, coordinator_data):
         """Test ToU allocation during peak hours."""
         current_time = datetime(2025, 1, 6, 16, 0, 0)  # Monday 4pm (peak)
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
         # Should allocate to peak
-        assert energy_tracker_tou._peak_kwh == 10.0
-        assert energy_tracker_tou._offpeak_kwh == 0.0
+        assert energy_tracker_tou._peak_kwh == Decimal("10.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._total_kwh == Decimal("10.0")  # Total should equal peak + offpeak
         
     def test_process_import_delta_tou_offpeak(self, energy_tracker_tou, coordinator_data):
         """Test ToU allocation during offpeak hours."""
         current_time = datetime(2025, 1, 6, 10, 0, 0)  # Monday 10am (offpeak)
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
         # Should allocate to offpeak
-        assert energy_tracker_tou._peak_kwh == 0.0
-        assert energy_tracker_tou._offpeak_kwh == 10.0
+        assert energy_tracker_tou._peak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("10.0")
+        assert energy_tracker_tou._total_kwh == Decimal("10.0")  # Total should equal peak + offpeak
         
     def test_process_import_delta_weekend(self, energy_tracker_tou, coordinator_data):
         """Test ToU allocation on weekend."""
         current_time = datetime(2025, 1, 4, 16, 0, 0)  # Saturday 4pm
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
         # Weekend should be offpeak even during peak hours
-        assert energy_tracker_tou._peak_kwh == 0.0
-        assert energy_tracker_tou._offpeak_kwh == 10.0
+        assert energy_tracker_tou._peak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("10.0")
+        assert energy_tracker_tou._total_kwh == Decimal("10.0")  # Total should equal peak + offpeak
         
     def test_process_import_delta_public_holiday(self, energy_tracker_tou, coordinator_data):
         """Test ToU allocation on public holiday."""
         current_time = datetime(2025, 1, 1, 16, 0, 0)  # New Year (Wednesday) 4pm
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
         # Public holiday should be offpeak
-        assert energy_tracker_tou._peak_kwh == 0.0
-        assert energy_tracker_tou._offpeak_kwh == 10.0
+        assert energy_tracker_tou._peak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("10.0")
+        assert energy_tracker_tou._total_kwh == Decimal("10.0")  # Total should equal peak + offpeak
         
     def test_process_import_delta_zero(self, energy_tracker):
         """Test that zero delta is ignored."""
-        energy_tracker._process_import_delta(0.0, {}, datetime.now())
+        energy_tracker._process_import_delta(Decimal("0.0"), {}, datetime.now())
         
-        assert energy_tracker._peak_kwh == 0.0
-        assert energy_tracker._offpeak_kwh == 0.0
+        assert energy_tracker._peak_kwh == Decimal("0.0")
+        assert energy_tracker._offpeak_kwh == Decimal("0.0")
         
     def test_process_import_delta_negative(self, energy_tracker):
         """Test that negative delta is ignored."""
-        energy_tracker._process_import_delta(-5.0, {}, datetime.now())
+        energy_tracker._process_import_delta(Decimal("-5.0"), {}, datetime.now())
         
-        assert energy_tracker._peak_kwh == 0.0
-        assert energy_tracker._offpeak_kwh == 0.0
+        assert energy_tracker._peak_kwh == Decimal("0.0")
+        assert energy_tracker._offpeak_kwh == Decimal("0.0")
         
     def test_process_import_delta_accumulation(self, energy_tracker_tou, coordinator_data):
         """Test that multiple deltas accumulate correctly."""
         current_time = datetime(2025, 1, 6, 16, 0, 0)  # Peak time
         
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
-        energy_tracker_tou._process_import_delta(5.0, coordinator_data, current_time)
-        energy_tracker_tou._process_import_delta(3.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("5.0"), coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("3.0"), coordinator_data, current_time)
         
-        assert energy_tracker_tou._peak_kwh == 18.0
-        assert energy_tracker_tou._offpeak_kwh == 0.0
+        assert energy_tracker_tou._peak_kwh == Decimal("18.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._total_kwh == Decimal("18.0")  # Total should equal peak + offpeak
+        
+    def test_process_import_delta_mixed_peak_offpeak(self, energy_tracker_tou, coordinator_data):
+        """Test that mixed peak and offpeak consumption correctly updates total."""
+        # Add some peak usage
+        peak_time = datetime(2025, 1, 6, 16, 0, 0)  # Monday 4pm (peak)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, peak_time)
+        
+        # Add some offpeak usage
+        offpeak_time = datetime(2025, 1, 6, 10, 0, 0)  # Monday 10am (offpeak)
+        energy_tracker_tou._process_import_delta(Decimal("5.0"), coordinator_data, offpeak_time)
+        
+        # Verify individual counters
+        assert energy_tracker_tou._peak_kwh == Decimal("10.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("5.0")
+        # Verify total is the sum
+        assert energy_tracker_tou._total_kwh == Decimal("15.0")
 
 
 class TestGetState:
@@ -330,22 +392,41 @@ class TestGetState:
         
         assert state["peak_kwh"] == 0.0
         assert state["offpeak_kwh"] == 0.0
+        assert state["total_kwh"] == 0.0
         assert state["export_kwh"] == 0.0
         assert state["last_reset"] is None
         
     def test_get_state_after_updates(self, energy_tracker, mock_state_factory):
         """Test get_state reflects accumulated values."""
-        energy_tracker._peak_kwh = 100.0
-        energy_tracker._offpeak_kwh = 200.0
-        energy_tracker._export_kwh = 50.0
+        energy_tracker._peak_kwh = Decimal("100.0")
+        energy_tracker._offpeak_kwh = Decimal("200.0")
+        energy_tracker._total_kwh = Decimal("300.0")
+        energy_tracker._export_kwh = Decimal("50.0")
         energy_tracker._last_reset = datetime(2025, 1, 1, 0, 0, 0)
         
         state = energy_tracker.get_state()
         
         assert state["peak_kwh"] == 100.0
         assert state["offpeak_kwh"] == 200.0
+        assert state["total_kwh"] == 300.0
         assert state["export_kwh"] == 50.0
         assert state["last_reset"] == datetime(2025, 1, 1, 0, 0, 0)
+
+    def test_get_state_tou_after_processing(self, energy_tracker_tou, coordinator_data):
+        """Test get_state returns correct total_kwh after ToU processing."""
+        # Process some peak and offpeak deltas
+        peak_time = datetime(2025, 1, 6, 16, 0, 0)  # Monday 4pm (peak)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, peak_time)
+        
+        offpeak_time = datetime(2025, 1, 6, 10, 0, 0)  # Monday 10am (offpeak)
+        energy_tracker_tou._process_import_delta(Decimal("5.0"), coordinator_data, offpeak_time)
+        
+        # Get state and verify
+        state = energy_tracker_tou.get_state()
+        
+        assert state["peak_kwh"] == 10.0
+        assert state["offpeak_kwh"] == 5.0
+        assert state["total_kwh"] == 15.0  # Should be sum of peak + offpeak
 
 
 class TestCalculateComponents:
@@ -354,10 +435,10 @@ class TestCalculateComponents:
     def test_calculate_components_with_data(self, energy_tracker, coordinator_data):
         """Test full calculation with real data."""
         # Set up some usage
-        energy_tracker._peak_kwh = 200.0
-        energy_tracker._offpeak_kwh = 300.0
-        energy_tracker._total_kwh = 500.0
-        energy_tracker._export_kwh = 100.0
+        energy_tracker._peak_kwh = Decimal("200.0")
+        energy_tracker._offpeak_kwh = Decimal("300.0")
+        energy_tracker._total_kwh = Decimal("500.0")
+        energy_tracker._export_kwh = Decimal("100.0")
         
         result = energy_tracker.calculate_components(coordinator_data)
         
@@ -395,52 +476,52 @@ class TestPublicHolidayScenarios:
         """Test New Year's Day (2025-01-01) is offpeak."""
         # Wednesday, 4pm (would be peak on normal weekday)
         current_time = datetime(2025, 1, 1, 16, 0, 0)
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
-        assert energy_tracker_tou._peak_kwh == 0.0
-        assert energy_tracker_tou._offpeak_kwh == 10.0
+        assert energy_tracker_tou._peak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("10.0")
         
     def test_chinese_new_year(self, energy_tracker_tou, coordinator_data):
         """Test Chinese New Year (2025-01-29) is offpeak."""
         # Wednesday, 4pm
         current_time = datetime(2025, 1, 29, 16, 0, 0)
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
-        assert energy_tracker_tou._peak_kwh == 0.0
-        assert energy_tracker_tou._offpeak_kwh == 10.0
+        assert energy_tracker_tou._peak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("10.0")
         
     def test_labour_day(self, energy_tracker_tou, coordinator_data):
         """Test Labour Day (2025-05-01) is offpeak."""
         # Thursday, 4pm
         current_time = datetime(2025, 5, 1, 16, 0, 0)
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
-        assert energy_tracker_tou._peak_kwh == 0.0
-        assert energy_tracker_tou._offpeak_kwh == 10.0
+        assert energy_tracker_tou._peak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("10.0")
         
     def test_christmas(self, energy_tracker_tou, coordinator_data):
         """Test Christmas (2025-12-25) is offpeak."""
         # Thursday, 4pm
         current_time = datetime(2025, 12, 25, 16, 0, 0)
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
-        assert energy_tracker_tou._peak_kwh == 0.0
-        assert energy_tracker_tou._offpeak_kwh == 10.0
+        assert energy_tracker_tou._peak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("10.0")
         
     def test_normal_weekday_peak(self, energy_tracker_tou, coordinator_data):
         """Test normal weekday during peak hours."""
         # Monday, 4pm (not a holiday)
         current_time = datetime(2025, 1, 6, 16, 0, 0)
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
-        assert energy_tracker_tou._peak_kwh == 10.0
-        assert energy_tracker_tou._offpeak_kwh == 0.0
+        assert energy_tracker_tou._peak_kwh == Decimal("10.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("0.0")
         
     def test_normal_weekday_offpeak(self, energy_tracker_tou, coordinator_data):
         """Test normal weekday during offpeak hours."""
         # Monday, 10am
         current_time = datetime(2025, 1, 6, 10, 0, 0)
-        energy_tracker_tou._process_import_delta(10.0, coordinator_data, current_time)
+        energy_tracker_tou._process_import_delta(Decimal("10.0"), coordinator_data, current_time)
         
-        assert energy_tracker_tou._peak_kwh == 0.0
-        assert energy_tracker_tou._offpeak_kwh == 10.0
+        assert energy_tracker_tou._peak_kwh == Decimal("0.0")
+        assert energy_tracker_tou._offpeak_kwh == Decimal("10.0")

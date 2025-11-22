@@ -26,6 +26,8 @@ from .calculations import (
     is_peak_time,
 )
 
+from decimal import Decimal
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -38,16 +40,23 @@ class TNBEnergyTracker:
         self._billing_day = max(1, min(28, billing_day))  # Validate billing day
         self._tariff_type = tariff_type
         
-        # Energy counters
-        self._peak_kwh = 0.0
-        self._offpeak_kwh = 0.0
-        self._total_kwh = 0.0  # For non-ToU (Standard) tariff
-        self._export_kwh = 0.0
+        # Energy counters (using Decimal for precision)
+        self._peak_kwh = Decimal("0.0")
+        self._offpeak_kwh = Decimal("0.0")
+        self._total_kwh = Decimal("0.0")  # For non-ToU (Standard) tariff
+        self._export_kwh = Decimal("0.0")
         self._last_reset = None
+        
+        # Restoration tracking (prevents showing zeros before state restoration)
+        self._restored = False
         
         # Last known sensor states
         self._last_import_state = None
         self._last_export_state = None
+        
+        # Event deduplication tracking (prevents duplicate processing from multiple listeners)
+        self._last_processed_import_time = None
+        self._last_processed_export_time = None
         
         _LOGGER.info(
             "Energy tracker initialized: billing_day=%d, tariff=%s",
@@ -56,33 +65,85 @@ class TNBEnergyTracker:
         )
 
     def restore_state(self, peak_kwh: float, offpeak_kwh: float, total_kwh: float, export_kwh: float, last_reset: datetime):
-        """Restore state from persistent storage."""
+        """Restore state from persistent storage (Legacy method, kept for compatibility)."""
         # Validate restored values (reasonable limit: < 100,000 kWh per month)
-        self._peak_kwh = max(0, min(100000, peak_kwh))
-        self._offpeak_kwh = max(0, min(100000, offpeak_kwh))
-        self._total_kwh = max(0, min(100000, total_kwh))
-        self._export_kwh = max(0, min(100000, export_kwh))
+        self._peak_kwh = Decimal(str(max(0, min(100000, peak_kwh))))
+        self._offpeak_kwh = Decimal(str(max(0, min(100000, offpeak_kwh))))
+        self._total_kwh = Decimal(str(max(0, min(100000, total_kwh))))
+        self._export_kwh = Decimal(str(max(0, min(100000, export_kwh))))
         self._last_reset = last_reset
         
         # Migration logic for existing non-ToU users who have data in offpeak
         if self._tariff_type != TARIFF_TOU and self._offpeak_kwh > 0 and self._total_kwh == 0:
             _LOGGER.info("Migrating non-ToU data from offpeak (%.2f) to total", self._offpeak_kwh)
             self._total_kwh = self._offpeak_kwh
-            self._offpeak_kwh = 0.0
+            self._offpeak_kwh = Decimal("0.0")
             
         _LOGGER.info(
-            "Restored energy state: peak=%.2f, offpeak=%.2f, total=%.2f, export=%.2f",
+            "Restored energy state: peak=%s, offpeak=%s, total=%s, export=%s",
             self._peak_kwh,
             self._offpeak_kwh,
             self._total_kwh,
             self._export_kwh
         )
 
+    def set_peak_kwh(self, value: float):
+        """Set peak kWh from restored sensor state."""
+        self._peak_kwh = Decimal(str(value))
+        # Note: Total is NOT automatically recalculated here to avoid race conditions
+        # during state restoration. Total will be recalculated after all sensors restore.
+
+    def set_offpeak_kwh(self, value: float):
+        """Set offpeak kWh from restored sensor state."""
+        self._offpeak_kwh = Decimal(str(value))
+        # Note: Total is NOT automatically recalculated here to avoid race conditions
+        # during state restoration. Total will be recalculated after all sensors restore.
+
+    def set_total_kwh(self, value: float):
+        """Set total kWh from restored sensor state."""
+        self._total_kwh = Decimal(str(value))
+        # For non-ToU mode, this is the authoritative value
+        # For ToU mode, this will be recalculated from peak + offpeak after all sensors restore
+
+    def set_export_kwh(self, value: float):
+        """Set export kWh from restored sensor state."""
+        self._export_kwh = Decimal(str(value))
+
+    def set_last_reset(self, value: datetime):
+        """Set last reset timestamp from restored sensor state."""
+        self._last_reset = value
+
+    def mark_as_restored(self):
+        """Mark tracker as restored (called after state restoration completes)."""
+        self._restored = True
+        _LOGGER.info("Energy tracker marked as restored")
+
+    def is_restored(self) -> bool:
+        """Check if tracker has been restored from previous state."""
+        return self._restored
+
+    def reconcile_tou_total(self):
+        """Recalculate total from peak + offpeak for ToU mode (call after all sensors restore)."""
+        if self._tariff_type == TARIFF_TOU:
+            calculated_total = self._peak_kwh + self._offpeak_kwh
+            if self._total_kwh != calculated_total:
+                _LOGGER.info(
+                    "ToU total reconciliation: was %s, recalculated as %s (peak=%s + offpeak=%s)",
+                    self._total_kwh, calculated_total, self._peak_kwh, self._offpeak_kwh
+                )
+                self._total_kwh = calculated_total
+
     @callback
     def handle_import_change(self, new_state, old_state, coordinator_data):
         """Handle changes in the import sensor."""
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return False
+        
+        # Deduplicate events (prevents multiple sensors from processing same state change)
+        if new_state.last_changed == self._last_processed_import_time:
+            _LOGGER.debug("Skipping duplicate import event at %s", new_state.last_changed)
+            return False
+        self._last_processed_import_time = new_state.last_changed
             
         try:
             new_val = float(new_state.state)
@@ -104,7 +165,7 @@ class TNBEnergyTracker:
                 delta = new_val - old_val
                 
             if delta > 0:
-                self._process_import_delta(delta, coordinator_data)
+                self._process_import_delta(Decimal(str(delta)), coordinator_data)
                 _LOGGER.debug("Import delta: %.2f kWh", delta)
                 
             self._last_import_state = new_val
@@ -119,6 +180,12 @@ class TNBEnergyTracker:
         """Handle changes in the export sensor."""
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return False
+        
+        # Deduplicate events (prevents multiple sensors from processing same state change)
+        if new_state.last_changed == self._last_processed_export_time:
+            _LOGGER.debug("Skipping duplicate export event at %s", new_state.last_changed)
+            return False
+        self._last_processed_export_time = new_state.last_changed
 
         try:
             new_val = float(new_state.state)
@@ -141,8 +208,8 @@ class TNBEnergyTracker:
                 
             if delta > 0:
                 self._check_reset()
-                self._export_kwh += delta
-                _LOGGER.debug("Export delta: %.2f kWh, total: %.2f kWh", delta, self._export_kwh)
+                self._export_kwh += Decimal(str(delta))
+                _LOGGER.debug("Export delta: %.2f kWh, total: %s kWh", delta, self._export_kwh)
                 
             self._last_export_state = new_val
             return True
@@ -151,7 +218,7 @@ class TNBEnergyTracker:
             _LOGGER.error("Error processing export state: %s", err)
             return False
 
-    def _process_import_delta(self, delta, coordinator_data, current_time=None):
+    def _process_import_delta(self, delta: Decimal, coordinator_data, current_time=None):
         """Allocate delta to Peak, Off-Peak, or Total based on tariff and time."""
         self._check_reset(current_time)
         
@@ -161,7 +228,7 @@ class TNBEnergyTracker:
         # Handle Non-ToU (Standard)
         if self._tariff_type != TARIFF_TOU:
             self._total_kwh += delta
-            _LOGGER.debug("Added %.2f kWh to total (total: %.2f kWh)", delta, self._total_kwh)
+            _LOGGER.debug("Added %s kWh to total (total: %s kWh)", delta, self._total_kwh)
             return
 
         # Handle ToU
@@ -174,10 +241,11 @@ class TNBEnergyTracker:
         
         if is_peak:
             self._peak_kwh += delta
-            _LOGGER.debug("Added %.2f kWh to peak (total: %.2f kWh)", delta, self._peak_kwh)
+            _LOGGER.debug("Added %s kWh to peak (total: %s kWh)", delta, self._peak_kwh)
         else:
             self._offpeak_kwh += delta
-            _LOGGER.debug("Added %.2f kWh to offpeak (total: %.2f kWh)", delta, self._offpeak_kwh)
+            _LOGGER.debug("Added %s kWh to offpeak (total: %s kWh)", delta, self._offpeak_kwh)
+        self._total_kwh = self._peak_kwh + self._offpeak_kwh
 
     def _check_reset(self, current_time=None):
         """Check if we need to reset for a new billing month."""
@@ -197,41 +265,42 @@ class TNBEnergyTracker:
                 
         if self._last_reset < current_period_start:
             _LOGGER.info(
-                "Billing cycle reset. Previous totals: peak=%.2f, offpeak=%.2f, total=%.2f, export=%.2f",
+                "Billing cycle reset. Previous totals: peak=%s, offpeak=%s, total=%s, export=%s",
                 self._peak_kwh,
                 self._offpeak_kwh,
                 self._total_kwh,
                 self._export_kwh
             )
-            self._peak_kwh = 0.0
-            self._offpeak_kwh = 0.0
-            self._total_kwh = 0.0
-            self._export_kwh = 0.0
+            self._peak_kwh = Decimal("0.0")
+            self._offpeak_kwh = Decimal("0.0")
+            self._total_kwh = Decimal("0.0")
+            self._export_kwh = Decimal("0.0")
             self._last_reset = current_time
 
     def get_state(self):
         """Get current energy state."""
         return {
-            "peak_kwh": self._peak_kwh,
-            "offpeak_kwh": self._offpeak_kwh,
-            "total_kwh": self._total_kwh,
-            "export_kwh": self._export_kwh,
+            "peak_kwh": float(self._peak_kwh),
+            "offpeak_kwh": float(self._offpeak_kwh),
+            "total_kwh": float(self._total_kwh),
+            "export_kwh": float(self._export_kwh),
             "last_reset": self._last_reset,
+            "last_reset_iso": self._last_reset.isoformat() if self._last_reset else None,
         }
 
     def set_values(self, peak_kwh=None, offpeak_kwh=None, total_kwh=None, export_kwh=None):
         """Manually set energy values (for corrections)."""
         if peak_kwh is not None:
-            self._peak_kwh = max(0, min(100000, peak_kwh))
+            self._peak_kwh = Decimal(str(max(0, min(100000, peak_kwh))))
         if offpeak_kwh is not None:
-            self._offpeak_kwh = max(0, min(100000, offpeak_kwh))
+            self._offpeak_kwh = Decimal(str(max(0, min(100000, offpeak_kwh))))
         if total_kwh is not None:
-            self._total_kwh = max(0, min(100000, total_kwh))
+            self._total_kwh = Decimal(str(max(0, min(100000, total_kwh))))
         if export_kwh is not None:
-            self._export_kwh = max(0, min(100000, export_kwh))
+            self._export_kwh = Decimal(str(max(0, min(100000, export_kwh))))
         
         _LOGGER.info(
-            "Manual override applied: peak=%.2f, offpeak=%.2f, total=%.2f, export=%.2f",
+            "Manual override applied: peak=%s, offpeak=%s, total=%s, export=%s",
             self._peak_kwh,
             self._offpeak_kwh,
             self._total_kwh,
@@ -283,8 +352,8 @@ class TNBEnergyTracker:
         )
         
         # Variable Charges (capacity + network)
-        capacity_rate = charges.get("capacity", 0)
-        network_rate = charges.get("network", 0)
+        capacity_rate = Decimal(str(charges.get("capacity", 0)))
+        network_rate = Decimal(str(charges.get("network", 0)))
         variable_rate = capacity_rate + network_rate
         
         capacity_charge = total_import * (capacity_rate / 100)
@@ -330,14 +399,7 @@ class TNBEnergyTracker:
         
         # --- 2. Calculate Export Credit ---
         
-        # Calculate EEI rate for export (same tiered structure as import)
-        # EEI rebate is negative, so for export we need to deduct it (reduce the credit)
-        eei_export_rebate = calculate_eei_rebate(self._export_kwh, eei)
-        # Convert rebate to rate: rebate = kwh * (rate/100), so rate = (rebate * 100) / kwh
-        eei_export_rate = 0.0
-        if self._export_kwh > 0:
-            eei_export_rate = (eei_export_rebate * 100) / self._export_kwh
-        
+        # Export credit calculation will determine EEI rate internally based on import usage
         credit_value, matched_peak, matched_offpeak, excess_export = calculate_export_credit(
             self._peak_kwh,
             self._offpeak_kwh,
@@ -348,7 +410,7 @@ class TNBEnergyTracker:
             variable_rate,
             self._tariff_type,
             rate,
-            eei_export_rate
+            eei
         )
         
         _LOGGER.debug(
@@ -368,7 +430,7 @@ class TNBEnergyTracker:
             "service_tax": service_tax_cost,
             "export_credit": credit_value,
             "excess_export_kwh": excess_export,
-            "net_bill": max(total_import_cost - credit_value, 0.0)
+            "net_bill": max(total_import_cost - credit_value, Decimal("0.0"))
         }
 
 
@@ -379,12 +441,58 @@ class TNBRatesCoordinator(DataUpdateCoordinator):
         """Initialize."""
         self.remote_url = remote_url
         self.energy_tracker = None  # Will be set by __init__.py after config is loaded
+        self._listener_removers = []  # Track listener cleanup functions
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
             update_interval=timedelta(hours=12),
         )
+
+    def setup_listeners(self, import_sensor: str, export_sensor: str = None):
+        """Set up state change listeners for import/export sensors."""
+        from homeassistant.helpers.event import async_track_state_change_event
+        
+        @callback
+        def handle_import_change(event):
+            """Handle import sensor state changes."""
+            if not self.energy_tracker:
+                return
+            new_state = event.data.get("new_state")
+            old_state = event.data.get("old_state")
+            if self.energy_tracker.handle_import_change(new_state, old_state, self.data):
+                # Notify all coordinator listeners to update
+                self.async_update_listeners()
+        
+        @callback
+        def handle_export_change(event):
+            """Handle export sensor state changes."""
+            if not self.energy_tracker:
+                return
+            new_state = event.data.get("new_state")
+            old_state = event.data.get("old_state")
+            if self.energy_tracker.handle_export_change(new_state, old_state):
+                # Notify all coordinator listeners to update
+                self.async_update_listeners()
+        
+        # Register listeners (only once per coordinator)
+        self._listener_removers.append(
+            async_track_state_change_event(self.hass, [import_sensor], handle_import_change)
+        )
+        _LOGGER.info("Registered import sensor listener: %s", import_sensor)
+        
+        if export_sensor:
+            self._listener_removers.append(
+                async_track_state_change_event(self.hass, [export_sensor], handle_export_change)
+            )
+            _LOGGER.info("Registered export sensor listener: %s", export_sensor)
+
+    def remove_listeners(self):
+        """Remove all state change listeners."""
+        for remover in self._listener_removers:
+            remover()
+        self._listener_removers.clear()
+        _LOGGER.info("Removed all sensor listeners")
 
     async def _async_update_data(self):
         """Fetch data from remote JSON."""

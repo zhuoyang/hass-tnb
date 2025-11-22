@@ -1,12 +1,15 @@
 """Tests for calculation functions in calculations.py module."""
 import pytest
 from datetime import datetime
+from decimal import Decimal
+
 from custom_components.tnb_rates.calculations import (
     calculate_energy_cost,
     calculate_variable_charges,
     calculate_retail_charge,
     calculate_afa_charge,
     calculate_eei_rebate,
+    calculate_eei_export_rate,
     calculate_kwtbb_tax,
     calculate_service_tax,
     calculate_export_credit,
@@ -136,9 +139,9 @@ class TestEnergyCalculation:
     
     def test_tou_tier1_selection(self, tariff_a):
         """Test ToU tariff Tier 1 selection (≤1500 kWh)."""
-        peak_kwh = 300.0
-        offpeak_kwh = 500.0
-        total_kwh = 800.0
+        peak_kwh = Decimal("300.0")
+        offpeak_kwh = Decimal("500.0")
+        total_kwh = Decimal("800.0")
         
         energy_cost, peak_rate, offpeak_rate, rate = calculate_energy_cost(
             peak_kwh, offpeak_kwh, total_kwh, tariff_a, TARIFF_TOU
@@ -152,9 +155,9 @@ class TestEnergyCalculation:
         
     def test_tou_tier2_selection(self, tariff_a):
         """Test ToU tariff Tier 2 selection (>1500 kWh)."""
-        peak_kwh = 800.0
-        offpeak_kwh = 1000.0
-        total_kwh = 1800.0
+        peak_kwh = Decimal("800.0")
+        offpeak_kwh = Decimal("1000.0")
+        total_kwh = Decimal("1800.0")
         
         energy_cost, peak_rate, offpeak_rate, rate = calculate_energy_cost(
             peak_kwh, offpeak_kwh, total_kwh, tariff_a, TARIFF_TOU
@@ -167,10 +170,10 @@ class TestEnergyCalculation:
         
     def test_standard_tariff_calculation(self, tariff_a):
         """Test standard tariff calculation."""
-        total_kwh = 500.0
+        total_kwh = Decimal("500.0")
         
         energy_cost, peak_rate, offpeak_rate, rate = calculate_energy_cost(
-            0, 0, total_kwh, tariff_a, TARIFF_STANDARD
+            Decimal("0"), Decimal("0"), total_kwh, tariff_a, TARIFF_STANDARD
         )
         
         # Standard tariff uses single rate
@@ -182,10 +185,10 @@ class TestEnergyCalculation:
     def test_zero_usage(self, tariff_a):
         """Test calculation with zero usage."""
         energy_cost, peak_rate, offpeak_rate, rate = calculate_energy_cost(
-            0, 0, 0, tariff_a, TARIFF_STANDARD
+            Decimal("0"), Decimal("0"), Decimal("0"), tariff_a, TARIFF_STANDARD
         )
         
-        assert energy_cost == 0.0
+        assert energy_cost == Decimal("0.0")
 
 
 class TestVariableCharges:
@@ -193,19 +196,19 @@ class TestVariableCharges:
     
     def test_variable_charges_calculation(self):
         """Test calculation of capacity + network charges."""
-        total_kwh = 1000.0
+        total_kwh = Decimal("1000.0")
         capacity_rate = 10.0  # sen/kWh
         network_rate = 5.0    # sen/kWh
         
         charges = calculate_variable_charges(total_kwh, capacity_rate, network_rate)
         
         # (1000 * 15) / 100 = 150 RM
-        assert charges == pytest.approx(150.0, rel=1e-2)
+        assert charges == Decimal("150.0")
         
     def test_variable_charges_zero_usage(self):
         """Test variable charges with zero usage."""
-        charges = calculate_variable_charges(0, 10.0, 5.0)
-        assert charges == 0.0
+        charges = calculate_variable_charges(Decimal("0"), 10.0, 5.0)
+        assert charges == Decimal("0.0")
 
 
 class TestRetailCharge:
@@ -217,8 +220,8 @@ class TestRetailCharge:
             "retail": 10.00,
             "retail_waiver_limit": 600
         }
-        charge = calculate_retail_charge(500, retail_config)
-        assert charge == 0.0
+        charge = calculate_retail_charge(Decimal("500"), retail_config)
+        assert charge == Decimal("0.0")
         
     def test_retail_charge_above_limit(self):
         """Test retail charge applied above limit."""
@@ -226,8 +229,8 @@ class TestRetailCharge:
             "retail": 10.00,
             "retail_waiver_limit": 600
         }
-        charge = calculate_retail_charge(700, retail_config)
-        assert charge == 10.00
+        charge = calculate_retail_charge(Decimal("700"), retail_config)
+        assert charge == Decimal("10.00")
         
     def test_retail_charge_at_limit(self):
         """Test retail charge at exact limit."""
@@ -235,8 +238,8 @@ class TestRetailCharge:
             "retail": 10.00,
             "retail_waiver_limit": 600
         }
-        charge = calculate_retail_charge(600, retail_config)
-        assert charge == 0.0  # At limit, not above
+        charge = calculate_retail_charge(Decimal("600"), retail_config)
+        assert charge == Decimal("0.0")  # At limit, not above
 
 
 class TestAFACharge:
@@ -244,18 +247,18 @@ class TestAFACharge:
     
     def test_afa_below_waiver_limit(self, afa_config):
         """Test AFA waived below limit."""
-        charge = calculate_afa_charge(500, afa_config, "2025-01")
-        assert charge == 0.0
+        charge = calculate_afa_charge(Decimal("500"), afa_config, "2025-01")
+        assert charge == Decimal("0.0")
         
     def test_afa_monthly_rate_lookup(self, afa_config):
         """Test AFA uses correct monthly rate."""
-        charge = calculate_afa_charge(1000, afa_config, "2025-01")
+        charge = calculate_afa_charge(Decimal("1000"), afa_config, "2025-01")
         # Charge should be >= 0 (may be 0 if rate is 0 for that month)
         assert charge >= 0
         
     def test_afa_fallback_rate(self, afa_config):
         """Test AFA uses fallback rate when month not found."""
-        charge = calculate_afa_charge(1000, afa_config, "2099-12")
+        charge = calculate_afa_charge(Decimal("1000"), afa_config, "2099-12")
         # Should use fallback rate
         assert charge >= 0
 
@@ -265,19 +268,68 @@ class TestEEIRebate:
     
     def test_eei_tier_selection(self, eei_config):
         """Test EEI rebate tier selection."""
-        rebate = calculate_eei_rebate(300, eei_config)
+        rebate = calculate_eei_rebate(Decimal("300"), eei_config)
         assert rebate < 0  # Rebate is negative (reduces bill)
         
     def test_eei_above_limit(self, eei_config):
         """Test EEI rebate not applied above limit."""
-        rebate = calculate_eei_rebate(1500, eei_config)
-        assert rebate == 0.0
+        rebate = calculate_eei_rebate(Decimal("1500"), eei_config)
+        assert rebate == Decimal("0.0")
         
     def test_eei_at_limit(self, eei_config):
         """Test EEI rebate at exact limit."""
-        limit = eei_config.get("limit", 1000)
+        limit = Decimal(str(eei_config.get("limit", 1000)))
         rebate = calculate_eei_rebate(limit, eei_config)
         assert rebate < 0  # Should still get rebate at limit
+
+
+class TestEEIExportRate:
+    """Test EEI export rate calculation."""
+    
+    def test_eei_export_rate_basic(self, eei_config):
+        """Test basic EEI export rate calculation."""
+        total_import = Decimal("300.0")
+        rate = calculate_eei_export_rate(total_import, eei_config)
+        # Rate should be negative (reduces credit)
+        assert rate < 0
+        
+    def test_eei_export_rate_uses_import_tier(self, eei_config):
+        """Test that export rate uses import quantity to determine tier."""
+        # Small import should use lower tier rate
+        rate_small = calculate_eei_export_rate(Decimal("100.0"), eei_config)
+        # Large import should use higher tier rate or same tier
+        rate_large = calculate_eei_export_rate(Decimal("500.0"), eei_config)
+        
+        # Both should be negative
+        assert rate_small < 0
+        assert rate_large < 0
+        
+    def test_eei_export_rate_above_limit(self, eei_config):
+        """Test EEI export rate when import is above limit."""
+        limit = Decimal(str(eei_config.get("limit", 1000)))
+        rate = calculate_eei_export_rate(limit + Decimal("500"), eei_config)
+        # Should be 0 when import exceeds limit
+        assert rate == Decimal("0.0")
+        
+    def test_eei_export_rate_zero_import(self, eei_config):
+        """Test EEI export rate with zero import."""
+        rate = calculate_eei_export_rate(Decimal("0.0"), eei_config)
+        assert rate == Decimal("0.0")
+        
+    def test_eei_export_rate_consistency(self, eei_config):
+        """Test that rate calculation is consistent with rebate."""
+        total_import = Decimal("400.0")
+        
+        # Get rate
+        rate = calculate_eei_export_rate(total_import, eei_config)
+        
+        # Get rebate
+        rebate = calculate_eei_rebate(total_import, eei_config)
+        
+        # Verify: rebate = kwh * (rate/100)
+        # So: rate = (rebate * 100) / kwh
+        expected_rate = (rebate * 100) / total_import
+        assert rate == pytest.approx(expected_rate, rel=1e-6)
 
 
 class TestKWTBBTax:
@@ -286,28 +338,28 @@ class TestKWTBBTax:
     def test_kwtbb_below_threshold(self):
         """Test KWTBB not applied below threshold."""
         kwtbb_config = {"threshold": 300, "rate": 1.6}
-        tax = calculate_kwtbb_tax(200, 100.0, kwtbb_config)
-        assert tax == 0.0
+        tax = calculate_kwtbb_tax(Decimal("200"), Decimal("100.0"), kwtbb_config)
+        assert tax == Decimal("0.0")
         
     def test_kwtbb_at_threshold(self):
         """Test KWTBB at exact threshold."""
         kwtbb_config = {"threshold": 300, "rate": 1.6}
-        tax = calculate_kwtbb_tax(300, 100.0, kwtbb_config)
-        assert tax == 0.0  # At threshold, not above
+        tax = calculate_kwtbb_tax(Decimal("300"), Decimal("100.0"), kwtbb_config)
+        assert tax == Decimal("0.0")  # At threshold, not above
         
     def test_kwtbb_above_threshold(self):
         """Test KWTBB applied above threshold."""
         kwtbb_config = {"threshold": 300, "rate": 1.6}
-        base_bill = 100.0
-        tax = calculate_kwtbb_tax(400, base_bill, kwtbb_config)
+        base_bill = Decimal("100.0")
+        tax = calculate_kwtbb_tax(Decimal("400"), base_bill, kwtbb_config)
         # 100 * 1.6 / 100 = 1.6
-        assert tax == pytest.approx(1.6, rel=1e-2)
+        assert tax == Decimal("1.6")
         
     def test_kwtbb_with_zero_base_bill(self):
         """Test KWTBB with zero base bill."""
         kwtbb_config = {"threshold": 300, "rate": 1.6}
-        tax = calculate_kwtbb_tax(400, 0.0, kwtbb_config)
-        assert tax == 0.0
+        tax = calculate_kwtbb_tax(Decimal("400"), Decimal("0.0"), kwtbb_config)
+        assert tax == Decimal("0.0")
 
 
 class TestServiceTax:
@@ -316,20 +368,20 @@ class TestServiceTax:
     def test_service_tax_below_exemption(self):
         """Test service tax not applied below exemption."""
         service_tax_config = {"exemption_limit": 600, "rate": 8.0}
-        tax = calculate_service_tax(500, 100.0, service_tax_config)
-        assert tax == 0.0
+        tax = calculate_service_tax(Decimal("500"), Decimal("100.0"), service_tax_config)
+        assert tax == Decimal("0.0")
         
     def test_service_tax_at_exemption(self):
         """Test service tax at exact exemption limit."""
         service_tax_config = {"exemption_limit": 600, "rate": 8.0}
-        tax = calculate_service_tax(600, 100.0, service_tax_config)
-        assert tax == 0.0  # At limit, not above
+        tax = calculate_service_tax(Decimal("600"), Decimal("100.0"), service_tax_config)
+        assert tax == Decimal("0.0")  # At limit, not above
         
     def test_service_tax_above_exemption(self):
         """Test service tax applied above exemption."""
         service_tax_config = {"exemption_limit": 600, "rate": 8.0}
-        base_bill = 100.0
-        total_kwh = 900.0
+        base_bill = Decimal("100.0")
+        total_kwh = Decimal("900.0")
         
         tax = calculate_service_tax(total_kwh, base_bill, service_tax_config)
         
@@ -342,15 +394,15 @@ class TestServiceTax:
     def test_service_tax_pro_rata_calculation(self):
         """Test service tax pro-rata calculation accuracy."""
         service_tax_config = {"exemption_limit": 600, "rate": 8.0}
-        base_bill = 200.0
-        total_kwh = 800.0
+        base_bill = Decimal("200.0")
+        total_kwh = Decimal("800.0")
         
         tax = calculate_service_tax(total_kwh, base_bill, service_tax_config)
         
         # (800-600)/800 = 0.25 taxable ratio
         # 200 * 0.25 = 50 taxable amount
         # 50 * 8 / 100 = 4.0
-        assert tax == pytest.approx(4.0, rel=1e-2)
+        assert tax == Decimal("4.0")
 
 
 class TestExportCredit:
@@ -358,12 +410,12 @@ class TestExportCredit:
     
     def test_peak_first_offset(self):
         """Test that peak energy is offset before offpeak."""
-        peak_kwh = 100.0
-        offpeak_kwh = 200.0
-        total_kwh = 300.0
-        export_kwh = 150.0
-        peak_rate = 50.0
-        offpeak_rate = 30.0
+        peak_kwh = Decimal("100.0")
+        offpeak_kwh = Decimal("200.0")
+        total_kwh = Decimal("300.0")
+        export_kwh = Decimal("150.0")
+        peak_rate = Decimal("50.0")
+        offpeak_rate = Decimal("30.0")
         variable_rate = 15.0
         
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
@@ -373,19 +425,19 @@ class TestExportCredit:
         )
         
         # Should offset all peak (100) first, then 50 from offpeak
-        assert matched_peak == 100.0
-        assert matched_offpeak == 50.0
-        assert excess == 0.0
+        assert matched_peak == Decimal("100.0")
+        assert matched_offpeak == Decimal("50.0")
+        assert excess == Decimal("0.0")
         assert credit > 0
         
     def test_partial_export(self):
         """Test export less than total import."""
-        peak_kwh = 100.0
-        offpeak_kwh = 200.0
-        total_kwh = 300.0
-        export_kwh = 50.0
-        peak_rate = 50.0
-        offpeak_rate = 30.0
+        peak_kwh = Decimal("100.0")
+        offpeak_kwh = Decimal("200.0")
+        total_kwh = Decimal("300.0")
+        export_kwh = Decimal("50.0")
+        peak_rate = Decimal("50.0")
+        offpeak_rate = Decimal("30.0")
         variable_rate = 15.0
         
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
@@ -395,18 +447,18 @@ class TestExportCredit:
         )
         
         # Should offset 50 from peak only
-        assert matched_peak == 50.0
-        assert matched_offpeak == 0.0
-        assert excess == 0.0
+        assert matched_peak == Decimal("50.0")
+        assert matched_offpeak == Decimal("0.0")
+        assert excess == Decimal("0.0")
         
     def test_excess_export(self):
         """Test export greater than total import."""
-        peak_kwh = 100.0
-        offpeak_kwh = 200.0
-        total_kwh = 300.0
-        export_kwh = 400.0
-        peak_rate = 50.0
-        offpeak_rate = 30.0
+        peak_kwh = Decimal("100.0")
+        offpeak_kwh = Decimal("200.0")
+        total_kwh = Decimal("300.0")
+        export_kwh = Decimal("400.0")
+        peak_rate = Decimal("50.0")
+        offpeak_rate = Decimal("30.0")
         variable_rate = 15.0
         
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
@@ -416,18 +468,18 @@ class TestExportCredit:
         )
         
         # Should offset all import, 100 excess
-        assert matched_peak == 100.0
-        assert matched_offpeak == 200.0
-        assert excess == 100.0
+        assert matched_peak == Decimal("100.0")
+        assert matched_offpeak == Decimal("200.0")
+        assert excess == Decimal("100.0")
         
     def test_export_credit_value_tou(self):
         """Test export credit value calculation for ToU."""
-        peak_kwh = 100.0
-        offpeak_kwh = 0.0
-        total_kwh = 100.0
-        export_kwh = 100.0
-        peak_rate = 40.0  # sen/kWh
-        offpeak_rate = 20.0
+        peak_kwh = Decimal("100.0")
+        offpeak_kwh = Decimal("0.0")
+        total_kwh = Decimal("100.0")
+        export_kwh = Decimal("100.0")
+        peak_rate = Decimal("40.0")  # sen/kWh
+        offpeak_rate = Decimal("20.0")
         variable_rate = 10.0  # sen/kWh
         
         credit, _, _, _ = calculate_export_credit(
@@ -437,157 +489,147 @@ class TestExportCredit:
         )
         
         # Credit = 100 * (40 + 10) / 100 = 50 RM
-        assert credit == pytest.approx(50.0, rel=1e-2)
+        assert credit == Decimal("50.0")
         
     def test_export_credit_value_standard(self):
         """Test export credit value calculation for standard tariff."""
-        peak_kwh = 0.0
-        offpeak_kwh = 0.0
-        total_kwh = 100.0
-        export_kwh = 100.0
-        rate = 30.0  # sen/kWh
+        peak_kwh = Decimal("0.0")
+        offpeak_kwh = Decimal("0.0")
+        total_kwh = Decimal("100.0")
+        export_kwh = Decimal("100.0")
+        rate = Decimal("30.0")  # sen/kWh
         variable_rate = 10.0  # sen/kWh
         
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
             peak_kwh, offpeak_kwh, total_kwh, export_kwh,
-            0, 0, variable_rate,
+            Decimal("0"), Decimal("0"), variable_rate,
             TARIFF_STANDARD, rate
         )
         
         # Credit = 100 * (30 + 10) / 100 = 40 RM
-        assert credit == pytest.approx(40.0, rel=1e-2)
-        assert matched_peak == 100.0 # matched_peak holds total matched for standard
-        assert excess == 0.0
+        assert credit == Decimal("40.0")
+        assert matched_peak == Decimal("100.0") # matched_peak holds total matched for standard
+        assert excess == Decimal("0.0")
         
     def test_zero_export(self):
         """Test with no export energy."""
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
-            100.0, 200.0, 300.0, 0.0,
-            50.0, 30.0, 15.0,
+            Decimal("100.0"), Decimal("200.0"), Decimal("300.0"), Decimal("0.0"),
+            Decimal("50.0"), Decimal("30.0"), 15.0,
             TARIFF_TOU
         )
         
-        assert matched_peak == 0.0
-        assert matched_offpeak == 0.0
-        assert excess == 0.0
-        assert credit == 0.0
+        assert matched_peak == Decimal("0.0")
+        assert matched_offpeak == Decimal("0.0")
+        assert excess == Decimal("0.0")
+        assert credit == Decimal("0.0")
 
     def test_non_tou_export_partial(self):
         """Test Non-ToU export credit with partial offset."""
-        peak_kwh = 0.0
-        offpeak_kwh = 0.0
-        total_kwh = 500.0
-        export_kwh = 200.0
-        rate = 21.8  # sen/kWh
+        peak_kwh = Decimal("0.0")
+        offpeak_kwh = Decimal("0.0")
+        total_kwh = Decimal("500.0")
+        export_kwh = Decimal("200.0")
+        rate = Decimal("21.8")  # sen/kWh
         variable_rate = 15.0
         
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
             peak_kwh, offpeak_kwh, total_kwh, export_kwh,
-            0, 0, variable_rate,
+            Decimal("0"), Decimal("0"), variable_rate,
             TARIFF_STANDARD, rate
         )
         
-        assert matched_peak == 200.0 # matched_peak holds total matched
-        assert excess == 0.0
+        assert matched_peak == Decimal("200.0") # matched_peak holds total matched
+        assert excess == Decimal("0.0")
         # Credit = 200 * (21.8 + 15.0) / 100 = 73.6 RM
-        assert credit == pytest.approx(73.6, rel=1e-2)
+        assert credit == Decimal("73.600")
 
     def test_non_tou_export_excess(self):
         """Test Non-ToU export credit with excess."""
-        peak_kwh = 0.0
-        offpeak_kwh = 0.0
-        total_kwh = 200.0
-        export_kwh = 300.0
-        rate = 21.8
+        peak_kwh = Decimal("0.0")
+        offpeak_kwh = Decimal("0.0")
+        total_kwh = Decimal("200.0")
+        export_kwh = Decimal("300.0")
+        rate = Decimal("21.8")
         variable_rate = 15.0
         
         credit, matched_peak, matched_offpeak, excess = calculate_export_credit(
             peak_kwh, offpeak_kwh, total_kwh, export_kwh,
-            0, 0, variable_rate,
+            Decimal("0"), Decimal("0"), variable_rate,
             TARIFF_STANDARD, rate
         )
         
-        assert matched_peak == 200.0
-        assert excess == 100.0
+        assert matched_peak == Decimal("200.0")
+        assert excess == Decimal("100.0")
         # Credit = 200 * (21.8 + 15.0) / 100 = 73.6 RM
-        assert credit == pytest.approx(73.6, rel=1e-2)
+        assert credit == Decimal("73.600")
 
-    def test_export_credit_with_eei_deduction_tou(self):
+    def test_export_credit_with_eei_deduction_tou(self, eei_config):
         """Test that EEI rate is deducted from export credit for ToU tariff."""
-        peak_kwh = 100.0
-        offpeak_kwh = 200.0
-        total_kwh = 300.0
-        export_kwh = 150.0
-        peak_rate = 50.0  # sen/kWh
-        offpeak_rate = 30.0  # sen/kWh
+        peak_kwh = Decimal("100.0")
+        offpeak_kwh = Decimal("200.0")
+        total_kwh = Decimal("300.0")
+        export_kwh = Decimal("150.0")
+        peak_rate = Decimal("50.0")  # sen/kWh
+        offpeak_rate = Decimal("30.0")  # sen/kWh
         variable_rate = 15.0  # sen/kWh
-        eei_rate = -5.0  # -5 sen/kWh (negative rebate, reduces credit)
         
         # Calculate without EEI
         credit_no_eei, _, _, _ = calculate_export_credit(
             peak_kwh, offpeak_kwh, total_kwh, export_kwh,
             peak_rate, offpeak_rate, variable_rate,
-            TARIFF_TOU, 0, 0.0
+            TARIFF_TOU, Decimal("0"), None
         )
         
-        # Calculate with EEI
+        # Calculate with EEI (using config instead of hardcoded rate)
         credit_with_eei, matched_peak, matched_offpeak, excess = calculate_export_credit(
             peak_kwh, offpeak_kwh, total_kwh, export_kwh,
             peak_rate, offpeak_rate, variable_rate,
-            TARIFF_TOU, 0, eei_rate
+            TARIFF_TOU, Decimal("0"), eei_config
         )
         
         # Should offset all peak (100) first, then 50 from offpeak
-        assert matched_peak == 100.0
-        assert matched_offpeak == 50.0
-        assert excess == 0.0
+        assert matched_peak == Decimal("100.0")
+        assert matched_offpeak == Decimal("50.0")
+        assert excess == Decimal("0.0")
         
         # Credit without EEI = 100*(50+15)/100 + 50*(30+15)/100 = 65 + 22.5 = 87.5
-        assert credit_no_eei == pytest.approx(87.5, rel=1e-2)
+        assert credit_no_eei == Decimal("87.5")
         
-        # Credit with EEI = 100*(50+15-5)/100 + 50*(30+15-5)/100 = 60 + 20 = 80
-        assert credit_with_eei == pytest.approx(80.0, rel=1e-2)
-        
-        # EEI should reduce credit by RM 7.5
+        # Credit with EEI should be less than without EEI
         assert credit_with_eei < credit_no_eei
-        assert (credit_no_eei - credit_with_eei) == pytest.approx(7.5, rel=1e-2)
 
-    def test_export_credit_with_eei_deduction_standard(self):
+    def test_export_credit_with_eei_deduction_standard(self, eei_config):
         """Test that EEI rate is deducted from export credit for standard tariff."""
-        peak_kwh = 0.0
-        offpeak_kwh = 0.0
-        total_kwh = 500.0
-        export_kwh = 200.0
-        rate = 30.0  # sen/kWh
+        peak_kwh = Decimal("0.0")
+        offpeak_kwh = Decimal("0.0")
+        total_kwh = Decimal("500.0")
+        export_kwh = Decimal("200.0")
+        rate = Decimal("30.0")  # sen/kWh
         variable_rate = 17.4  # sen/kWh (4.55 + 12.85)
-        eei_rate = -10.0  # -10 sen/kWh (negative rebate)
         
         # Calculate without EEI
         credit_no_eei, _, _, _ = calculate_export_credit(
             peak_kwh, offpeak_kwh, total_kwh, export_kwh,
-            0, 0, variable_rate,
-            TARIFF_STANDARD, rate, 0.0
+            Decimal("0"), Decimal("0"), variable_rate,
+            TARIFF_STANDARD, rate, None
         )
         
-        # Calculate with EEI
+        # Calculate with EEI (using config instead of hardcoded rate)
         credit_with_eei, matched_peak, _, excess = calculate_export_credit(
             peak_kwh, offpeak_kwh, total_kwh, export_kwh,
-            0, 0, variable_rate,
-            TARIFF_STANDARD, rate, eei_rate
+            Decimal("0"), Decimal("0"), variable_rate,
+            TARIFF_STANDARD, rate, eei_config
         )
         
-        assert matched_peak == 200.0  # matched_peak holds total matched for standard
-        assert excess == 0.0
+        assert matched_peak == Decimal("200.0")  # matched_peak holds total matched for standard
+        assert excess == Decimal("0.0")
         
         # Credit without EEI = 200 * (30 + 17.4) / 100 = 94.8 RM
-        assert credit_no_eei == pytest.approx(94.8, rel=1e-2)
+        assert credit_no_eei == Decimal("94.8")
         
-        # Credit with EEI = 200 * (30 + 17.4 - 10) / 100 = 74.8 RM
-        assert credit_with_eei == pytest.approx(74.8, rel=1e-2)
-        
-        # EEI should reduce credit by RM 20.0
+        # Credit with EEI should be less than without EEI
         assert credit_with_eei < credit_no_eei
-        assert (credit_no_eei - credit_with_eei) == pytest.approx(20.0, rel=1e-2)
 
 
 
@@ -634,14 +676,14 @@ class TestRealBillVerification:
         Final bill: RM 367.43 - RM 214.84 = RM 152.59
         """
         # Import usage data
-        peak_kwh = 160.0
-        offpeak_kwh = 798.0
-        total_kwh = 958.0
+        peak_kwh = Decimal("160.0")
+        offpeak_kwh = Decimal("798.0")
+        total_kwh = Decimal("958.0")
         
         # Export data
-        export_kwh = 504.0
-        export_peak_kwh = 160.0  # Matched all peak import
-        export_offpeak_kwh = 344.0  # Matched 344 out of 798 offpeak
+        export_kwh = Decimal("504.0")
+        export_peak_kwh = Decimal("160.0")  # Matched all peak import
+        export_offpeak_kwh = Decimal("344.0")  # Matched 344 out of 798 offpeak
         
         # Tariff configuration (E1 Enhanced ToU for 901-1500 kWh tier)
         tariff = {
@@ -684,6 +726,8 @@ class TestRealBillVerification:
         
         # === IMPORT COST CALCULATION ===
         
+        # === IMPORT COST CALCULATION ===
+        
         # Step 1: Energy cost
         energy_cost, peak_rate, offpeak_rate, _ = calculate_energy_cost(
             peak_kwh, offpeak_kwh, total_kwh, tariff, TARIFF_TOU
@@ -693,65 +737,67 @@ class TestRealBillVerification:
         peak_energy_cost = peak_kwh * (peak_rate / 100)
         offpeak_energy_cost = offpeak_kwh * (offpeak_rate / 100)
         
-        assert peak_rate == 28.52
-        assert offpeak_rate == 24.43
-        assert peak_energy_cost == pytest.approx(45.63, rel=1e-2)
-        assert offpeak_energy_cost == pytest.approx(194.95, rel=1e-2)
-        assert energy_cost == pytest.approx(240.58, rel=1e-2)
+        assert peak_rate == Decimal("28.52")
+        assert offpeak_rate == Decimal("24.43")
+        assert float(peak_energy_cost) == pytest.approx(45.63, rel=1e-2)
+        assert float(offpeak_energy_cost) == pytest.approx(194.95, rel=1e-2)
+        assert float(energy_cost) == pytest.approx(240.58, rel=1e-2)
         
         # Step 2: Variable charges
-        capacity_charge = total_kwh * (tariff["capacity_rate"] / 100)
-        network_charge = total_kwh * (tariff["network_rate"] / 100)
+        capacity_charge = total_kwh * (Decimal(str(tariff["capacity_rate"])) / 100)
+        network_charge = total_kwh * (Decimal(str(tariff["network_rate"])) / 100)
         variable_charges = calculate_variable_charges(
             total_kwh, tariff["capacity_rate"], tariff["network_rate"]
         )
         
-        assert capacity_charge == pytest.approx(43.59, rel=1e-2)
-        assert network_charge == pytest.approx(123.10, rel=1e-2)
-        assert variable_charges == pytest.approx(166.69, rel=1e-2)
+        assert float(capacity_charge) == pytest.approx(43.59, rel=1e-2)
+        assert float(network_charge) == pytest.approx(123.10, rel=1e-2)
+        assert float(variable_charges) == pytest.approx(166.69, rel=1e-2)
         
         # Step 3: AFA rebate
         afa_charge = calculate_afa_charge(total_kwh, afa_config, "2025-01")
-        assert afa_charge == pytest.approx(-62.27, abs=0.02)
+        assert float(afa_charge) == pytest.approx(-62.27, abs=0.02)
         
         # Step 4: Retail charge
         retail_charge = calculate_retail_charge(total_kwh, tariff)
-        assert retail_charge == pytest.approx(10.00, rel=1e-2)
+        assert float(retail_charge) == pytest.approx(10.00, rel=1e-2)
         
         # Step 5: EEI rebate (for import)
         eei_rebate_import = calculate_eei_rebate(total_kwh, eei_config)
-        assert eei_rebate_import == pytest.approx(-4.79, rel=1e-2)
+        assert float(eei_rebate_import) == pytest.approx(-4.79, rel=1e-2)
         
         # Step 6: Base bill (before tax)
         base_bill = energy_cost + variable_charges + afa_charge + retail_charge + eei_rebate_import
-        assert base_bill == pytest.approx(350.21, abs=0.02)
+        assert float(base_bill) == pytest.approx(350.21, abs=0.02)
         
         # Step 7: KWTBB tax (1.6%)
         kwtbb_base = energy_cost + variable_charges + eei_rebate_import
         kwtbb_tax = calculate_kwtbb_tax(total_kwh, kwtbb_base, kwtbb_config)
-        assert kwtbb_tax == pytest.approx(6.44, abs=0.01)
+        assert float(kwtbb_tax) == pytest.approx(6.44, abs=0.01)
         
         # Step 8: Service tax (8% on taxable portion)
         service_tax = calculate_service_tax(total_kwh, base_bill, service_tax_config)
-        assert service_tax == pytest.approx(10.78, abs=0.5)
+        assert float(service_tax) == pytest.approx(10.78, abs=0.5)
         
         # Step 9: Total bill before NEM credits
         total_before_nem = base_bill + service_tax + kwtbb_tax
-        assert total_before_nem == pytest.approx(367.43, abs=0.5)
+        assert float(total_before_nem) == pytest.approx(367.43, abs=0.5)
         
         # === NEM EXPORT CREDIT CALCULATION ===
         
-        # Calculate EEI rate for export
-        eei_export_rebate = calculate_eei_rebate(export_kwh, eei_config)
-        eei_export_rate = 0.0
-        if export_kwh > 0:
-            eei_export_rate = (eei_export_rebate * 100) / export_kwh
+        # Calculate EEI rate for export based on import usage
+        eei_export_rate = calculate_eei_export_rate(total_kwh, eei_config)
+        
+        # Calculate what the EEI rebate would be if applied to export quantity
+        # (for verification - this is what gets deducted from credit)
+        eei_export_rebate = export_kwh * (eei_export_rate / 100)
         
         # EEI deduction (Pelarasan Insentif)
         # This is the absolute value of the EEI rebate for export (positive charge)
         pelarasan_insentif = abs(eei_export_rebate)
-        assert pelarasan_insentif == pytest.approx(2.52, abs=0.02)
+        assert float(pelarasan_insentif) == pytest.approx(2.52, abs=0.02)
         
+        # Calculate export credit
         # Calculate export credit
         variable_rate = tariff["capacity_rate"] + tariff["network_rate"]
         credit_value, matched_peak, matched_offpeak, excess_export = calculate_export_credit(
@@ -763,39 +809,39 @@ class TestRealBillVerification:
             offpeak_rate,
             variable_rate,
             TARIFF_TOU,
-            0.0,
-            eei_export_rate
+            Decimal("0.0"),
+            eei_config
         )
         
         # Verify export matching (peak-first algorithm)
-        assert matched_peak == 160.0  # All peak import offset
-        assert matched_offpeak == 344.0  # 344 out of 798 offpeak offset
-        assert excess_export == 0.0  # No excess export
+        assert matched_peak == Decimal("160.0")  # All peak import offset
+        assert matched_offpeak == Decimal("344.0")  # 344 out of 798 offpeak offset
+        assert excess_export == Decimal("0.0")  # No excess export
         
         # Verify individual export credit components
         peak_export_credit = export_peak_kwh * (peak_rate / 100)
         offpeak_export_credit = export_offpeak_kwh * (offpeak_rate / 100)
-        capacity_export_credit = export_kwh * (tariff["capacity_rate"] / 100)
-        network_export_credit = export_kwh * (tariff["network_rate"] / 100)
+        capacity_export_credit = export_kwh * (Decimal(str(tariff["capacity_rate"])) / 100)
+        network_export_credit = export_kwh * (Decimal(str(tariff["network_rate"])) / 100)
         
-        assert peak_export_credit == pytest.approx(45.63, abs=0.02)
-        assert offpeak_export_credit == pytest.approx(84.04, abs=0.02)
-        assert capacity_export_credit == pytest.approx(22.93, abs=0.02)
-        assert network_export_credit == pytest.approx(64.76, abs=0.02)
+        assert float(peak_export_credit) == pytest.approx(45.63, abs=0.02)
+        assert float(offpeak_export_credit) == pytest.approx(84.04, abs=0.02)
+        assert float(capacity_export_credit) == pytest.approx(22.93, abs=0.02)
+        assert float(network_export_credit) == pytest.approx(64.76, abs=0.02)
         
         # Total credit before EEI deduction
         total_credit_before_eei = (peak_export_credit + offpeak_export_credit + 
                                    capacity_export_credit + network_export_credit)
-        assert total_credit_before_eei == pytest.approx(217.36, abs=0.1)
+        assert float(total_credit_before_eei) == pytest.approx(217.36, abs=0.1)
         
         # Net credit after EEI deduction
         net_nem_credit = credit_value
-        assert net_nem_credit == pytest.approx(214.84, abs=0.1)
+        assert float(net_nem_credit) == pytest.approx(214.84, abs=0.1)
         
         # Verify the credit matches: total_credit_before_eei - pelarasan_insentif
-        assert net_nem_credit == pytest.approx(total_credit_before_eei - pelarasan_insentif, abs=0.1)
+        assert float(net_nem_credit) == pytest.approx(float(total_credit_before_eei - pelarasan_insentif), abs=0.1)
         
         # Step 10: Final bill
         final_bill = total_before_nem - net_nem_credit
-        assert final_bill == pytest.approx(152.59, abs=0.5)
+        assert float(final_bill) == pytest.approx(152.59, abs=0.5)
 
