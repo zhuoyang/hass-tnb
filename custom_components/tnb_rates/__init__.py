@@ -33,6 +33,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Create energy tracker with configuration
     coordinator.energy_tracker = TNBEnergyTracker(hass, billing_day, tariff_type)
     
+    # Calculate expected sensor count for restoration coordination
+    # Energy sensors: Total, Export, NEM Balance (always 3)
+    # + Peak, Offpeak (if ToU) = 5 total for ToU, 3 for Standard
+    from .const import TARIFF_TOU
+    expected_sensors = 5 if tariff_type == TARIFF_TOU else 3
+    coordinator.energy_tracker.set_expected_sensor_count(expected_sensors)
+    
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})

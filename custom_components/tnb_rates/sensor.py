@@ -43,6 +43,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         TNBRatesExcessExportSensor(hass, coordinator, config_entry),
         TNBRatesTotalEnergySensor(hass, coordinator, config_entry),
         TNBRatesExportEnergySensor(hass, coordinator, config_entry),
+        TNBRatesNEMBalanceSensor(hass, coordinator, config_entry),
     ]
     
     # Add ToU specific sensors
@@ -60,11 +61,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         offpeak_kwh = call.data.get("offpeak_kwh")
         total_kwh = call.data.get("total_kwh")
         export_kwh = call.data.get("export_kwh")
+        nem_balance_kwh = call.data.get("nem_balance_kwh")
         
         # Get coordinator for all config entries and update
         for entry_id, coordinator_instance in hass.data[DOMAIN].items():
             if hasattr(coordinator_instance, 'energy_tracker') and coordinator_instance.energy_tracker:
-                coordinator_instance.energy_tracker.set_values(peak_kwh, offpeak_kwh, total_kwh, export_kwh)
+                coordinator_instance.energy_tracker.set_values(peak_kwh, offpeak_kwh, total_kwh, export_kwh, nem_balance_kwh)
                 coordinator_instance.async_update_listeners()
                 _LOGGER.info("Energy values updated for entry %s", entry_id)
     
@@ -190,6 +192,15 @@ class TNBRatesImportCostSensor(TNBRatesBaseSensor):
         components = self._get_components()
         return float(round(components.get("import_cost", 0.0), 2))
 
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        attrs = {}
+        if self.coordinator.energy_tracker:
+            state = self.coordinator.energy_tracker.get_state()
+            attrs["last_reset"] = state["last_reset"].isoformat() if state["last_reset"] else None
+        return attrs
+
 
 class TNBRatesExportCreditSensor(TNBRatesBaseSensor):
     """Sensor for the Export Credit Value."""
@@ -208,6 +219,15 @@ class TNBRatesExportCreditSensor(TNBRatesBaseSensor):
             return None
         components = self._get_components()
         return float(round(components.get("export_credit", 0.0), 2))
+
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        attrs = {}
+        if self.coordinator.energy_tracker:
+            state = self.coordinator.energy_tracker.get_state()
+            attrs["last_reset"] = state["last_reset"].isoformat() if state["last_reset"] else None
+        return attrs
 
 
 class TNBRatesExcessExportSensor(TNBRatesBaseSensor):
@@ -258,17 +278,16 @@ class TNBRatesEnergySensor(TNBRatesBaseSensor):
                         except (ValueError, TypeError) as err:
                             _LOGGER.warning("Failed to restore last_reset: %s", err)
                 
-                # After all sensors restore, reconcile ToU total (only for ToU-specific sensors)
-                # This is called multiple times but reconcile_tou_total is idempotent
-                if self.coordinator.energy_tracker:
-                    self.coordinator.energy_tracker.reconcile_tou_total()
-                    
             except (ValueError, TypeError):
                 pass
         
-        # Mark as restored (either from previous state or starting fresh)
+        # Register this sensor as restored (centralized coordination)
+        # The tracker will reconcile and mark as fully restored when all sensors complete
         if self.coordinator.energy_tracker:
-            self.coordinator.energy_tracker.mark_as_restored()
+            is_complete = self.coordinator.energy_tracker.register_sensor_restored()
+            if is_complete:
+                # All sensors restored - trigger UI update
+                self.coordinator.async_update_listeners()
 
     @property
     def extra_state_attributes(self):
@@ -363,3 +382,20 @@ class TNBRatesExportEnergySensor(TNBRatesEnergySensor):
     def _restore_to_tracker(self, value):
         if self.coordinator.energy_tracker:
             self.coordinator.energy_tracker.set_export_kwh(value)
+
+
+class TNBRatesNEMBalanceSensor(TNBRatesEnergySensor):
+    """Sensor for NEM Balance."""
+    _attr_name = "NEM Balance"
+
+    @property
+    def native_value(self):
+        if not self.coordinator.energy_tracker:
+            return None
+        if not self.coordinator.energy_tracker.is_restored():
+            return None
+        return self.coordinator.energy_tracker.get_nem_balance_kwh()
+
+    def _restore_to_tracker(self, value):
+        if self.coordinator.energy_tracker:
+            self.coordinator.energy_tracker.set_nem_balance_kwh(value)

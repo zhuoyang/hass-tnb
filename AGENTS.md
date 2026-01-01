@@ -26,23 +26,23 @@ j:\tnb-ha\
 
 ## Testing
 
-This project uses `pytest` for testing.
+This project uses `pytest` for testing and `uv` for dependency management and test execution.
 
 ### How to Run Tests
 
 To run all tests:
 ```bash
-pytest
+uv run pytest
 ```
 
 To run a specific test file:
 ```bash
-pytest tests/test_calculations.py
+uv run pytest tests/test_calculations.py
 ```
 
 To run a specific test function:
 ```bash
-pytest tests/test_calculations.py::TestEnergyCalculation::test_tou_tier1_selection
+uv run pytest tests/test_calculations.py::TestEnergyCalculation::test_tou_tier1_selection
 ```
 
 ### How to Write Tests

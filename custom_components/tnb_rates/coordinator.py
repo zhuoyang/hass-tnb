@@ -45,18 +45,18 @@ class TNBEnergyTracker:
         self._offpeak_kwh = Decimal("0.0")
         self._total_kwh = Decimal("0.0")  # For non-ToU (Standard) tariff
         self._export_kwh = Decimal("0.0")
+        self._nem_balance = Decimal("0.0")  # NEM balance carried from previous billing periods
         self._last_reset = None
         
         # Restoration tracking (prevents showing zeros before state restoration)
         self._restored = False
+        self._expected_sensors = 0
+        self._restored_sensors = 0
+        self._fully_restored = False
         
         # Last known sensor states
         self._last_import_state = None
         self._last_export_state = None
-        
-        # Event deduplication tracking (prevents duplicate processing from multiple listeners)
-        self._last_processed_import_time = None
-        self._last_processed_export_time = None
         
         _LOGGER.info(
             "Energy tracker initialized: billing_day=%d, tariff=%s",
@@ -73,11 +73,6 @@ class TNBEnergyTracker:
         self._export_kwh = Decimal(str(max(0, min(100000, export_kwh))))
         self._last_reset = last_reset
         
-        # Migration logic for existing non-ToU users who have data in offpeak
-        if self._tariff_type != TARIFF_TOU and self._offpeak_kwh > 0 and self._total_kwh == 0:
-            _LOGGER.info("Migrating non-ToU data from offpeak (%.2f) to total", self._offpeak_kwh)
-            self._total_kwh = self._offpeak_kwh
-            self._offpeak_kwh = Decimal("0.0")
             
         _LOGGER.info(
             "Restored energy state: peak=%s, offpeak=%s, total=%s, export=%s",
@@ -109,18 +104,62 @@ class TNBEnergyTracker:
         """Set export kWh from restored sensor state."""
         self._export_kwh = Decimal(str(value))
 
+    def set_nem_balance_kwh(self, value: float):
+        """Set NEM balance kWh from restored sensor state."""
+        self._nem_balance = Decimal(str(max(0, value)))
+
+    def get_nem_balance_kwh(self) -> float:
+        """Get current NEM balance value."""
+        return float(self._nem_balance)
+
     def set_last_reset(self, value: datetime):
         """Set last reset timestamp from restored sensor state."""
         self._last_reset = value
 
+    def set_expected_sensor_count(self, count: int):
+        """Set how many sensors will restore state."""
+        self._expected_sensors = count
+        _LOGGER.info("Expecting %d sensors to restore state", count)
+
+    def register_sensor_restored(self):
+        """Called by each sensor after it restores. Returns True when all sensors are restored."""
+        self._restored_sensors += 1
+        _LOGGER.debug("Sensor restored (%d/%d)", self._restored_sensors, self._expected_sensors)
+        
+        if self._restored_sensors >= self._expected_sensors:
+            # All sensors have restored - now reconcile and mark as fully restored
+            self.reconcile_tou_total()
+            self._fully_restored = True
+            self._restored = True  # Backward compatibility
+            
+            # Check if billing cycle reset is needed after restoration
+            if self._last_reset is not None:
+                current_time = dt_util.now()
+                current_period_start = self._calculate_period_start(current_time)
+                
+                if self._last_reset < current_period_start:
+                    _LOGGER.info(
+                        "Billing cycle changed during offline period. Processing reset from %s to %s",
+                        self._last_reset, current_period_start
+                    )
+                    self._check_reset(current_time)
+            
+            _LOGGER.info(
+                "All %d sensors restored. Tracker marked as fully restored.",
+                self._expected_sensors
+            )
+            return True
+        return False
+
     def mark_as_restored(self):
-        """Mark tracker as restored (called after state restoration completes)."""
+        """Legacy method for backward compatibility. Prefer using register_sensor_restored()."""
         self._restored = True
-        _LOGGER.info("Energy tracker marked as restored")
+        self._fully_restored = True
+        _LOGGER.info("Energy tracker marked as restored (legacy method)")
 
     def is_restored(self) -> bool:
-        """Check if tracker has been restored from previous state."""
-        return self._restored
+        """Check if tracker has been fully restored from previous state."""
+        return self._fully_restored or self._restored
 
     def reconcile_tou_total(self):
         """Recalculate total from peak + offpeak for ToU mode (call after all sensors restore)."""
@@ -138,12 +177,6 @@ class TNBEnergyTracker:
         """Handle changes in the import sensor."""
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return False
-        
-        # Deduplicate events (prevents multiple sensors from processing same state change)
-        if new_state.last_changed == self._last_processed_import_time:
-            _LOGGER.debug("Skipping duplicate import event at %s", new_state.last_changed)
-            return False
-        self._last_processed_import_time = new_state.last_changed
             
         try:
             new_val = float(new_state.state)
@@ -180,12 +213,6 @@ class TNBEnergyTracker:
         """Handle changes in the export sensor."""
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return False
-        
-        # Deduplicate events (prevents multiple sensors from processing same state change)
-        if new_state.last_changed == self._last_processed_export_time:
-            _LOGGER.debug("Skipping duplicate export event at %s", new_state.last_changed)
-            return False
-        self._last_processed_export_time = new_state.last_changed
 
         try:
             new_val = float(new_state.state)
@@ -207,7 +234,9 @@ class TNBEnergyTracker:
                 delta = new_val - old_val
                 
             if delta > 0:
-                self._check_reset()
+                # Only check reset if already restored
+                if self.is_restored():
+                    self._check_reset()
                 self._export_kwh += Decimal(str(delta))
                 _LOGGER.debug("Export delta: %.2f kWh, total: %s kWh", delta, self._export_kwh)
                 
@@ -220,7 +249,10 @@ class TNBEnergyTracker:
 
     def _process_import_delta(self, delta: Decimal, coordinator_data, current_time=None):
         """Allocate delta to Peak, Off-Peak, or Total based on tariff and time."""
-        self._check_reset(current_time)
+        # Only check for billing cycle reset after restoration is complete
+        # This prevents resetting counters during HA startup before sensors restore
+        if self.is_restored():
+            self._check_reset(current_time)
         
         if delta <= 0:
             return
@@ -247,6 +279,16 @@ class TNBEnergyTracker:
             _LOGGER.debug("Added %s kWh to offpeak (total: %s kWh)", delta, self._offpeak_kwh)
         self._total_kwh = self._peak_kwh + self._offpeak_kwh
 
+    def _calculate_period_start(self, current_time):
+        """Calculate the start of the current billing period."""
+        current_period_start = current_time.replace(day=self._billing_day, hour=0, minute=0, second=0, microsecond=0)
+        if current_time.day < self._billing_day:
+            if current_time.month == 1:
+                current_period_start = current_period_start.replace(year=current_time.year-1, month=12)
+            else:
+                current_period_start = current_period_start.replace(month=current_time.month-1)
+        return current_period_start
+
     def _check_reset(self, current_time=None):
         """Check if we need to reset for a new billing month."""
         if current_time is None:
@@ -256,21 +298,44 @@ class TNBEnergyTracker:
             self._last_reset = current_time
             return
 
-        current_period_start = current_time.replace(day=self._billing_day, hour=0, minute=0, second=0, microsecond=0)
-        if current_time.day < self._billing_day:
-            if current_time.month == 1:
-                current_period_start = current_period_start.replace(year=current_time.year-1, month=12)
-            else:
-                current_period_start = current_period_start.replace(month=current_time.month-1)
+        current_period_start = self._calculate_period_start(current_time)
                 
         if self._last_reset < current_period_start:
-            _LOGGER.info(
-                "Billing cycle reset. Previous totals: peak=%s, offpeak=%s, total=%s, export=%s",
-                self._peak_kwh,
-                self._offpeak_kwh,
-                self._total_kwh,
-                self._export_kwh
-            )
+            # Calculate excess export before monthly reset
+            # Using simple calculation: excess = export - max(import)
+            current_import = self._peak_kwh + self._offpeak_kwh if self._tariff_type == TARIFF_TOU else self._total_kwh
+            current_excess = max(Decimal("0.0"), self._export_kwh - current_import)
+            
+            # Check if we need yearly reset (January 1st)
+            year_reset_date = current_time.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+            
+            if self._last_reset < year_reset_date and current_time >= year_reset_date:
+                # Yearly reset on Jan 1 - discard NEM balance
+                _LOGGER.info(
+                    "Yearly reset on Jan 1. Discarding NEM balance: %.2f kWh. Previous month totals: peak=%s, offpeak=%s, total=%s, export=%s, excess=%s",
+                    self._nem_balance,
+                    self._peak_kwh,
+                    self._offpeak_kwh,
+                    self._total_kwh,
+                    self._export_kwh,
+                    current_excess
+                )
+                self._nem_balance = Decimal("0.0")
+            else:
+                # Monthly reset - carry forward excess export to NEM balance
+                self._nem_balance += current_excess
+                _LOGGER.info(
+                    "Monthly billing cycle reset. Carrying forward %.2f kWh NEM balance (previous: %.2f + current excess: %.2f). Previous totals: peak=%s, offpeak=%s, total=%s, export=%s",
+                    self._nem_balance,
+                    self._nem_balance - current_excess,
+                    current_excess,
+                    self._peak_kwh,
+                    self._offpeak_kwh,
+                    self._total_kwh,
+                    self._export_kwh
+                )
+            
+            # Reset monthly counters
             self._peak_kwh = Decimal("0.0")
             self._offpeak_kwh = Decimal("0.0")
             self._total_kwh = Decimal("0.0")
@@ -284,11 +349,12 @@ class TNBEnergyTracker:
             "offpeak_kwh": float(self._offpeak_kwh),
             "total_kwh": float(self._total_kwh),
             "export_kwh": float(self._export_kwh),
+            "nem_balance_kwh": float(self._nem_balance),
             "last_reset": self._last_reset,
             "last_reset_iso": self._last_reset.isoformat() if self._last_reset else None,
         }
 
-    def set_values(self, peak_kwh=None, offpeak_kwh=None, total_kwh=None, export_kwh=None):
+    def set_values(self, peak_kwh=None, offpeak_kwh=None, total_kwh=None, export_kwh=None, nem_balance_kwh=None):
         """Manually set energy values (for corrections)."""
         if peak_kwh is not None:
             self._peak_kwh = Decimal(str(max(0, min(100000, peak_kwh))))
@@ -298,13 +364,16 @@ class TNBEnergyTracker:
             self._total_kwh = Decimal(str(max(0, min(100000, total_kwh))))
         if export_kwh is not None:
             self._export_kwh = Decimal(str(max(0, min(100000, export_kwh))))
+        if nem_balance_kwh is not None:
+            self._nem_balance = Decimal(str(max(0, min(100000, nem_balance_kwh))))
         
         _LOGGER.info(
-            "Manual override applied: peak=%s, offpeak=%s, total=%s, export=%s",
+            "Manual override applied: peak=%s, offpeak=%s, total=%s, export=%s, nem_balance=%s",
             self._peak_kwh,
             self._offpeak_kwh,
             self._total_kwh,
-            self._export_kwh
+            self._export_kwh,
+            self._nem_balance
         )
 
     def calculate_components(self, coordinator_data):
@@ -397,14 +466,17 @@ class TNBEnergyTracker:
             energy_cost, capacity_charge, network_charge, retail_charge, afa_cost, eei_rebate, kwtbb_cost, service_tax_cost, total_import_cost
         )
         
-        # --- 2. Calculate Export Credit ---
+        # --- 2. Calculate Export Credit (including NEM balance) ---
+        
+        # Combine current month export with NEM balance from previous months
+        effective_export = self._export_kwh + self._nem_balance
         
         # Export credit calculation will determine EEI rate internally based on import usage
         credit_value, matched_peak, matched_offpeak, excess_export = calculate_export_credit(
             self._peak_kwh,
             self._offpeak_kwh,
             self._total_kwh,
-            self._export_kwh,
+            effective_export,
             peak_rate,
             offpeak_rate,
             variable_rate,
@@ -414,8 +486,8 @@ class TNBEnergyTracker:
         )
         
         _LOGGER.debug(
-            "Export credit: matched_peak=%.2f kWh, matched_offpeak=%.2f kWh, excess=%.2f kWh, credit=%.2f RM",
-            matched_peak, matched_offpeak, excess_export, credit_value
+            "Export credit: current_export=%.2f kWh, nem_balance=%.2f kWh, effective_export=%.2f kWh, matched_peak=%.2f kWh, matched_offpeak=%.2f kWh, excess=%.2f kWh, credit=%.2f RM",
+            self._export_kwh, self._nem_balance, effective_export, matched_peak, matched_offpeak, excess_export, credit_value
         )
         
         return {
