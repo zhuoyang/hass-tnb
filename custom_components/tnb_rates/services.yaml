@@ -2,6 +2,22 @@ set_energy_values:
   name: Set Energy Values
   description: Manually override accumulated energy values for the current billing cycle
   fields:
+    config_entry_id:
+      name: TNB Rates entry
+      description: Entry to update. Required when more than one TNB Rates entry is set up.
+      selector:
+        config_entry:
+          integration: tnb_rates
+    total_kwh:
+      name: Total Energy
+      description: Total imported energy in kWh, Standard tariff only (ToU total is always peak + off-peak) (optional)
+      example: 350.0
+      selector:
+        number:
+          min: 0
+          max: 100000
+          step: 0.01
+          unit_of_measurement: kWh
     peak_kwh:
       name: Peak Energy
       description: Peak period energy in kWh (optional)

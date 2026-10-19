@@ -41,22 +41,37 @@ class TestNEMBalanceMonthlyReset:
         # Should carry forward 50 + 40 = 90 kWh total
         assert tracker._nem_balance == Decimal("90.0")
 
-    def test_nem_balance_with_no_excess_export(self, hass_mock):
-        """Test that nem_balance stays the same when there's no excess."""
+    def test_nem_balance_fully_consumed(self, hass_mock):
+        """Test that nem_balance is used up when import exceeds export + balance."""
         tracker = TNBEnergyTracker(hass_mock, billing_day=1, tariff_type=TARIFF_STANDARD)
-        
+
         # Start with existing NEM balance
         tracker._nem_balance = Decimal("30.0")
         tracker._last_reset = datetime(2025, 3, 1, 0, 0, 0)
-        
-        # Generate 150 kWh import, 100 kWh export (no excess)
+
+        # Generate 150 kWh import, 100 kWh export (100 + 30 < 150)
         tracker._total_kwh = Decimal("150.0")
         tracker._export_kwh = Decimal("100.0")
-        
+
         # Reset
         tracker._check_reset(datetime(2025, 4, 1, 0, 0, 0))
-        
-        # NEM balance should remain at 30.0 (no new excess added)
+
+        # Balance was spent offsetting this month's import
+        assert tracker._nem_balance == Decimal("0.0")
+
+    def test_nem_balance_partially_consumed(self, hass_mock):
+        """Test that only the unused part of nem_balance carries forward."""
+        tracker = TNBEnergyTracker(hass_mock, billing_day=1, tariff_type=TARIFF_STANDARD)
+
+        tracker._nem_balance = Decimal("50.0")
+        tracker._last_reset = datetime(2025, 3, 1, 0, 0, 0)
+
+        # 100 kWh import, 80 kWh export: 20 kWh of balance used
+        tracker._total_kwh = Decimal("100.0")
+        tracker._export_kwh = Decimal("80.0")
+
+        tracker._check_reset(datetime(2025, 4, 1, 0, 0, 0))
+
         assert tracker._nem_balance == Decimal("30.0")
 
     def test_nem_balance_with_tou_tariff(self, hass_mock):
@@ -270,8 +285,8 @@ class Testnem_balancePersistence:
 class TestNEMBalanceEdgeCases:
     """Test edge cases and boundary conditions."""
 
-    def test_no_export_no_nem_balance_change(self, hass_mock):
-        """Test that no export doesn't affect NEM balance."""
+    def test_no_export_consumes_nem_balance(self, hass_mock):
+        """Test that import with no export draws down NEM balance."""
         tracker = TNBEnergyTracker(hass_mock, billing_day=1, tariff_type=TARIFF_STANDARD)
         
         tracker._nem_balance = Decimal("100.0")
@@ -283,8 +298,8 @@ class TestNEMBalanceEdgeCases:
         
         tracker._check_reset(datetime(2025, 4, 1, 0, 0, 0))
         
-        # nem_balance unchanged (no new excess to add)
-        assert tracker._nem_balance == Decimal("100.0")
+        # 200 kWh import uses up the whole 100 kWh balance
+        assert tracker._nem_balance == Decimal("0.0")
 
     def test_first_reset_initializes_last_reset(self, hass_mock):
         """Test that first call to _check_reset initializes last_reset."""
@@ -353,10 +368,10 @@ class TestNEMBalanceEdgeCases:
         tracker._check_reset(datetime(2025, 5, 1, 0, 0, 0))
         assert tracker._nem_balance == Decimal("45.0")
         
-        # May: No excess (import > export)
+        # May: import > export, 20 kWh drawn from balance
         tracker._total_kwh = Decimal("100.0")
         tracker._export_kwh = Decimal("80.0")
         tracker._check_reset(datetime(2025, 6, 1, 0, 0, 0))
-        assert tracker._nem_balance == Decimal("45.0")  # Unchanged
+        assert tracker._nem_balance == Decimal("25.0")
 
 

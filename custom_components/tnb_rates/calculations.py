@@ -1,6 +1,6 @@
 """Pure calculation functions for TNB billing components."""
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from decimal import Decimal
 
@@ -168,23 +168,56 @@ def calculate_retail_charge(
     return Decimal("0.0")
 
 
+def calculate_month_weights(period_start: datetime, current_time: datetime) -> Dict[str, Decimal]:
+    """
+    Split the elapsed billing period into calendar months, weighted by days.
+
+    Returns:
+        Dict of "YYYY-MM" -> share of elapsed days (shares sum to 1)
+    """
+    start = period_start.date()
+    end = max(current_time.date(), start)
+
+    day_counts: Dict[str, int] = {}
+    day = start
+    while day <= end:
+        key = day.strftime("%Y-%m")
+        day_counts[key] = day_counts.get(key, 0) + 1
+        day += timedelta(days=1)
+
+    total_days = Decimal(sum(day_counts.values()))
+    return {key: Decimal(count) / total_days for key, count in day_counts.items()}
+
+
 def calculate_afa_charge(
     total_kwh: Decimal,
     afa_config: Dict[str, Any],
-    current_month_key: str
+    current_month_key: str,
+    month_weights: Optional[Dict[str, Decimal]] = None
 ) -> Decimal:
     """
     Calculate AFA charge with monthly rate lookup.
+
+    When month_weights is given (billing period spanning calendar months),
+    the AFA rate is pro-rated by the days falling in each month.
     """
     waiver_limit = Decimal(str(afa_config.get("waiver_limit", 600)))
-    
+
     if total_kwh <= waiver_limit:
         return Decimal("0.0")
-        
+
     afa_rates = afa_config.get("rates", {})
-    afa_rate_val = afa_rates.get(current_month_key, afa_config.get("rate", 0.0))
-    afa_rate = Decimal(str(afa_rate_val))
-    
+    default_rate = afa_config.get("rate", 0.0)
+
+    if month_weights:
+        afa_rate = sum(
+            (Decimal(str(afa_rates.get(key, default_rate))) * weight
+             for key, weight in month_weights.items()),
+            Decimal("0.0")
+        )
+    else:
+        afa_rate = Decimal(str(afa_rates.get(current_month_key, default_rate)))
+
     return total_kwh * (afa_rate / 100)
 
 

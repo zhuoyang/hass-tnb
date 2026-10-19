@@ -20,3 +20,7 @@ DEFAULT_REMOTE_URL = "https://raw.githubusercontent.com/zhuoyang/hass-tnb/main/r
 
 # Services
 SERVICE_SET_ENERGY_VALUES = "set_energy_values"
+ATTR_CONFIG_ENTRY_ID = "config_entry_id"
+
+# Highest billing day accepted (keeps the reset day valid in every month)
+MAX_BILLING_DAY = 28

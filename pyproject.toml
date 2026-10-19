@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "aiohttp>=3.9.0",
-    "async-timeout>=4.0.0",
 ]
 
 [project.optional-dependencies]

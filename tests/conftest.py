@@ -11,13 +11,26 @@ sys.modules['homeassistant.helpers'] = MagicMock()
 sys.modules['homeassistant.helpers.update_coordinator'] = MagicMock()
 sys.modules['homeassistant.helpers.entity'] = MagicMock()
 sys.modules['homeassistant.helpers.entity_platform'] = MagicMock()
+sys.modules['homeassistant.helpers.aiohttp_client'] = MagicMock()
+sys.modules['homeassistant.helpers.storage'] = MagicMock()
+sys.modules['homeassistant.helpers.event'] = MagicMock()
+sys.modules['homeassistant.exceptions'] = MagicMock()
 sys.modules['homeassistant.util'] = MagicMock()
 sys.modules['homeassistant.util.dt'] = MagicMock()
+sys.modules['voluptuous'] = MagicMock()
 
 # Define actual constants that tests need
 from homeassistant import const as ha_const
 ha_const.STATE_UNAVAILABLE = "unavailable"
 ha_const.STATE_UNKNOWN = "unknown"
+
+# @callback must leave the decorated function callable
+sys.modules['homeassistant.core'].callback = lambda func: func
+
+# dt_util.now() returns a real (naive, like the test datetimes) datetime
+from datetime import datetime as _datetime
+sys.modules['homeassistant.util'].dt = sys.modules['homeassistant.util.dt']
+sys.modules['homeassistant.util.dt'].now = _datetime.now
 
 import json
 import pytest

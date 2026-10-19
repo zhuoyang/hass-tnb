@@ -1,24 +1,24 @@
 """DataUpdateCoordinator for TNB Rates."""
+import asyncio
 import logging
-import json
-import aiohttp
-import async_timeout
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
 )
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, DEFAULT_REMOTE_URL, TARIFF_TOU, SENSOR_RESET_THRESHOLD
+from .const import DOMAIN, TARIFF_TOU, SENSOR_RESET_THRESHOLD, MAX_BILLING_DAY
 from .calculations import (
     calculate_energy_cost,
-    calculate_variable_charges,
     calculate_retail_charge,
     calculate_afa_charge,
+    calculate_month_weights,
     calculate_eei_rebate,
     calculate_kwtbb_tax,
     calculate_service_tax,
@@ -30,6 +30,15 @@ from decimal import Decimal
 
 _LOGGER = logging.getLogger(__name__)
 
+RATES_STORAGE_VERSION = 1
+
+EMPTY_COMPONENTS = {
+    "import_cost": 0.0,
+    "export_credit": 0.0,
+    "excess_export_kwh": 0.0,
+    "net_bill": 0.0
+}
+
 
 class TNBEnergyTracker:
     """Class to track energy import/export and calculate costs."""
@@ -37,9 +46,9 @@ class TNBEnergyTracker:
     def __init__(self, hass: HomeAssistant, billing_day: int, tariff_type: str):
         """Initialize energy tracker."""
         self.hass = hass
-        self._billing_day = max(1, min(28, billing_day))  # Validate billing day
+        self._billing_day = max(1, min(MAX_BILLING_DAY, billing_day))  # Validate billing day
         self._tariff_type = tariff_type
-        
+
         # Energy counters (using Decimal for precision)
         self._peak_kwh = Decimal("0.0")
         self._offpeak_kwh = Decimal("0.0")
@@ -47,39 +56,20 @@ class TNBEnergyTracker:
         self._export_kwh = Decimal("0.0")
         self._nem_balance = Decimal("0.0")  # NEM balance carried from previous billing periods
         self._last_reset = None
-        
+
         # Restoration tracking (prevents showing zeros before state restoration)
         self._restored = False
-        self._expected_sensors = 0
-        self._restored_sensors = 0
-        self._fully_restored = False
-        
-        # Last known sensor states
+
+        # Last seen meter readings, used as the baseline for the next delta.
+        # Persisted across restarts so energy used while HA was down, or while
+        # the meter was unavailable, is still counted.
         self._last_import_state = None
         self._last_export_state = None
-        
+
         _LOGGER.info(
             "Energy tracker initialized: billing_day=%d, tariff=%s",
             self._billing_day,
             self._tariff_type
-        )
-
-    def restore_state(self, peak_kwh: float, offpeak_kwh: float, total_kwh: float, export_kwh: float, last_reset: datetime):
-        """Restore state from persistent storage (Legacy method, kept for compatibility)."""
-        # Validate restored values (reasonable limit: < 100,000 kWh per month)
-        self._peak_kwh = Decimal(str(max(0, min(100000, peak_kwh))))
-        self._offpeak_kwh = Decimal(str(max(0, min(100000, offpeak_kwh))))
-        self._total_kwh = Decimal(str(max(0, min(100000, total_kwh))))
-        self._export_kwh = Decimal(str(max(0, min(100000, export_kwh))))
-        self._last_reset = last_reset
-        
-            
-        _LOGGER.info(
-            "Restored energy state: peak=%s, offpeak=%s, total=%s, export=%s",
-            self._peak_kwh,
-            self._offpeak_kwh,
-            self._total_kwh,
-            self._export_kwh
         )
 
     def set_peak_kwh(self, value: float):
@@ -112,54 +102,30 @@ class TNBEnergyTracker:
         """Get current NEM balance value."""
         return float(self._nem_balance)
 
-    def set_last_reset(self, value: datetime):
+    def set_last_reset(self, value):
         """Set last reset timestamp from restored sensor state."""
         self._last_reset = value
 
-    def set_expected_sensor_count(self, count: int):
-        """Set how many sensors will restore state."""
-        self._expected_sensors = count
-        _LOGGER.info("Expecting %d sensors to restore state", count)
+    def set_last_readings(self, import_reading=None, export_reading=None):
+        """Set the last seen meter readings from restored sensor state."""
+        if import_reading is not None:
+            self._last_import_state = float(import_reading)
+        if export_reading is not None:
+            self._last_export_state = float(export_reading)
 
-    def register_sensor_restored(self):
-        """Called by each sensor after it restores. Returns True when all sensors are restored."""
-        self._restored_sensors += 1
-        _LOGGER.debug("Sensor restored (%d/%d)", self._restored_sensors, self._expected_sensors)
-        
-        if self._restored_sensors >= self._expected_sensors:
-            # All sensors have restored - now reconcile and mark as fully restored
-            self.reconcile_tou_total()
-            self._fully_restored = True
-            self._restored = True  # Backward compatibility
-            
-            # Check if billing cycle reset is needed after restoration
-            if self._last_reset is not None:
-                current_time = dt_util.now()
-                current_period_start = self._calculate_period_start(current_time)
-                
-                if self._last_reset < current_period_start:
-                    _LOGGER.info(
-                        "Billing cycle changed during offline period. Processing reset from %s to %s",
-                        self._last_reset, current_period_start
-                    )
-                    self._check_reset(current_time)
-            
-            _LOGGER.info(
-                "All %d sensors restored. Tracker marked as fully restored.",
-                self._expected_sensors
-            )
-            return True
-        return False
-
-    def mark_as_restored(self):
-        """Legacy method for backward compatibility. Prefer using register_sensor_restored()."""
+    def finish_restoration(self):
+        """Mark restoration complete. Call once all sensor entities have been added."""
+        self.reconcile_tou_total()
         self._restored = True
-        self._fully_restored = True
-        _LOGGER.info("Energy tracker marked as restored (legacy method)")
+
+        # Process a billing cycle reset that happened while HA was offline
+        self._check_reset()
+
+        _LOGGER.info("Energy tracker restored: %s", self.get_state())
 
     def is_restored(self) -> bool:
         """Check if tracker has been fully restored from previous state."""
-        return self._fully_restored or self._restored
+        return self._restored
 
     def reconcile_tou_total(self):
         """Recalculate total from peak + offpeak for ToU mode (call after all sensors restore)."""
@@ -172,80 +138,78 @@ class TNBEnergyTracker:
                 )
                 self._total_kwh = calculated_total
 
+    @staticmethod
+    def _parse_reading(state):
+        """Return a numeric meter reading from a state, or None if it has no usable value."""
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return None
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            _LOGGER.error("Invalid meter reading: %s", state.state)
+            return None
+
+    @staticmethod
+    def _reading_delta(new_val: float, baseline: float, label: str) -> float:
+        """Return energy recorded since the baseline reading, handling meter resets."""
+        if new_val >= baseline:
+            return new_val - baseline
+        if new_val < SENSOR_RESET_THRESHOLD:  # Likely a real reset
+            _LOGGER.info("%s sensor reset detected: %s -> %s, delta=%.2f kWh", label, baseline, new_val, new_val)
+            return new_val
+        _LOGGER.warning("Unexpected decrease in %s sensor: %s -> %s, ignoring", label.lower(), baseline, new_val)
+        return 0.0
+
+    def _next_delta(self, new_state, old_state, last_reading, label):
+        """Work out the new reading and delta since the last seen reading.
+
+        Returns (new_reading, delta). delta is None when there is no baseline yet.
+        """
+        new_val = self._parse_reading(new_state)
+        if new_val is None:
+            return None, None
+
+        # Prefer our own last seen reading over the event's old_state, so a
+        # reading after an unavailable period (or HA restart) is still counted
+        baseline = last_reading
+        if baseline is None:
+            baseline = self._parse_reading(old_state)
+        if baseline is None:
+            return new_val, None
+        return new_val, self._reading_delta(new_val, baseline, label)
+
     @callback
     def handle_import_change(self, new_state, old_state, coordinator_data):
         """Handle changes in the import sensor."""
-        if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        new_val, delta = self._next_delta(new_state, old_state, self._last_import_state, "Import")
+        if new_val is None:
             return False
-            
-        try:
-            new_val = float(new_state.state)
-            if old_state is None or old_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                self._last_import_state = new_val
-                return False
-                
-            old_val = float(old_state.state)
-            
-            # Detect sensor reset
-            if new_val < old_val:
-                if new_val < SENSOR_RESET_THRESHOLD:  # Likely a real reset
-                    delta = new_val
-                    _LOGGER.info("Import sensor reset detected: %s -> %s, delta=%.2f kWh", old_val, new_val, delta)
-                else:
-                    _LOGGER.warning("Unexpected decrease in import sensor: %s -> %s, ignoring", old_val, new_val)
-                    delta = 0
-            else:
-                delta = new_val - old_val
-                
-            if delta > 0:
-                self._process_import_delta(Decimal(str(delta)), coordinator_data)
-                _LOGGER.debug("Import delta: %.2f kWh", delta)
-                
-            self._last_import_state = new_val
-            return True
-            
-        except ValueError as err:
-            _LOGGER.error("Error processing import state: %s", err)
+        self._last_import_state = new_val
+        if delta is None:
             return False
+
+        if delta > 0:
+            self._process_import_delta(Decimal(str(delta)), coordinator_data)
+            _LOGGER.debug("Import delta: %.2f kWh", delta)
+        return True
 
     @callback
     def handle_export_change(self, new_state, old_state):
         """Handle changes in the export sensor."""
-        if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        new_val, delta = self._next_delta(new_state, old_state, self._last_export_state, "Export")
+        if new_val is None:
+            return False
+        self._last_export_state = new_val
+        if delta is None:
             return False
 
-        try:
-            new_val = float(new_state.state)
-            if old_state is None or old_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                self._last_export_state = new_val
-                return False
-            
-            old_val = float(old_state.state)
-            
-            # Detect sensor reset
-            if new_val < old_val:
-                if new_val < SENSOR_RESET_THRESHOLD:  # Likely a real reset
-                    delta = new_val
-                    _LOGGER.info("Export sensor reset detected: %s -> %s, delta=%.2f kWh", old_val, new_val, delta)
-                else:
-                    _LOGGER.warning("Unexpected decrease in export sensor: %s -> %s, ignoring", old_val, new_val)
-                    delta = 0
-            else:
-                delta = new_val - old_val
-                
-            if delta > 0:
-                # Only check reset if already restored
-                if self.is_restored():
-                    self._check_reset()
-                self._export_kwh += Decimal(str(delta))
-                _LOGGER.debug("Export delta: %.2f kWh, total: %s kWh", delta, self._export_kwh)
-                
-            self._last_export_state = new_val
-            return True
-            
-        except ValueError as err:
-            _LOGGER.error("Error processing export state: %s", err)
-            return False
+        if delta > 0:
+            # Only check reset if already restored
+            if self.is_restored():
+                self._check_reset()
+            self._export_kwh += Decimal(str(delta))
+            _LOGGER.debug("Export delta: %.2f kWh, total: %s kWh", delta, self._export_kwh)
+        return True
 
     def _process_import_delta(self, delta: Decimal, coordinator_data, current_time=None):
         """Allocate delta to Peak, Off-Peak, or Total based on tariff and time."""
@@ -253,7 +217,7 @@ class TNBEnergyTracker:
         # This prevents resetting counters during HA startup before sensors restore
         if self.is_restored():
             self._check_reset(current_time)
-        
+
         if delta <= 0:
             return
 
@@ -268,9 +232,9 @@ class TNBEnergyTracker:
         if current_time is None:
             current_time = dt_util.now()
         tou_config = coordinator_data.get("tariff_a", {}).get("tou", {})
-        
+
         is_peak = is_peak_time(current_time, tou_config)
-        
+
         if is_peak:
             self._peak_kwh += delta
             _LOGGER.debug("Added %s kWh to peak (total: %s kWh)", delta, self._peak_kwh)
@@ -289,26 +253,32 @@ class TNBEnergyTracker:
                 current_period_start = current_period_start.replace(month=current_time.month-1)
         return current_period_start
 
+    def check_reset(self, current_time=None):
+        """Run the billing cycle reset check, once restoration is complete."""
+        if self.is_restored():
+            self._check_reset(current_time)
+
     def _check_reset(self, current_time=None):
         """Check if we need to reset for a new billing month."""
         if current_time is None:
             current_time = dt_util.now()
-        
+
         if self._last_reset is None:
             self._last_reset = current_time
             return
 
         current_period_start = self._calculate_period_start(current_time)
-                
+
         if self._last_reset < current_period_start:
             # Calculate excess export before monthly reset
-            # Using simple calculation: excess = export - max(import)
+            # The carried NEM balance is consumed alongside this month's export,
+            # so the new balance is whatever remains after offsetting import
             current_import = self._peak_kwh + self._offpeak_kwh if self._tariff_type == TARIFF_TOU else self._total_kwh
-            current_excess = max(Decimal("0.0"), self._export_kwh - current_import)
-            
+            current_excess = max(Decimal("0.0"), self._export_kwh + self._nem_balance - current_import)
+
             # Check if we need yearly reset (January 1st)
             year_reset_date = current_time.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-            
+
             if self._last_reset < year_reset_date and current_time >= year_reset_date:
                 # Yearly reset on Jan 1 - discard NEM balance
                 _LOGGER.info(
@@ -322,19 +292,19 @@ class TNBEnergyTracker:
                 )
                 self._nem_balance = Decimal("0.0")
             else:
-                # Monthly reset - carry forward excess export to NEM balance
-                self._nem_balance += current_excess
+                # Monthly reset - carry forward unused export (incl. unused NEM balance)
+                previous_balance = self._nem_balance
+                self._nem_balance = current_excess
                 _LOGGER.info(
-                    "Monthly billing cycle reset. Carrying forward %.2f kWh NEM balance (previous: %.2f + current excess: %.2f). Previous totals: peak=%s, offpeak=%s, total=%s, export=%s",
+                    "Monthly billing cycle reset. Carrying forward %.2f kWh NEM balance (previous balance: %.2f). Previous totals: peak=%s, offpeak=%s, total=%s, export=%s",
                     self._nem_balance,
-                    self._nem_balance - current_excess,
-                    current_excess,
+                    previous_balance,
                     self._peak_kwh,
                     self._offpeak_kwh,
                     self._total_kwh,
                     self._export_kwh
                 )
-            
+
             # Reset monthly counters
             self._peak_kwh = Decimal("0.0")
             self._offpeak_kwh = Decimal("0.0")
@@ -352,6 +322,8 @@ class TNBEnergyTracker:
             "nem_balance_kwh": float(self._nem_balance),
             "last_reset": self._last_reset,
             "last_reset_iso": self._last_reset.isoformat() if self._last_reset else None,
+            "last_import_reading": self._last_import_state,
+            "last_export_reading": self._last_export_state,
         }
 
     def set_values(self, peak_kwh=None, offpeak_kwh=None, total_kwh=None, export_kwh=None, nem_balance_kwh=None):
@@ -366,7 +338,10 @@ class TNBEnergyTracker:
             self._export_kwh = Decimal(str(max(0, min(100000, export_kwh))))
         if nem_balance_kwh is not None:
             self._nem_balance = Decimal(str(max(0, min(100000, nem_balance_kwh))))
-        
+
+        # For ToU the total is always peak + offpeak
+        self.reconcile_tou_total()
+
         _LOGGER.info(
             "Manual override applied: peak=%s, offpeak=%s, total=%s, export=%s, nem_balance=%s",
             self._peak_kwh,
@@ -376,41 +351,34 @@ class TNBEnergyTracker:
             self._nem_balance
         )
 
-    def calculate_components(self, coordinator_data):
+    def calculate_components(self, coordinator_data, current_time=None):
         """Calculate all cost components and return a dict."""
         if not coordinator_data:
             _LOGGER.warning("No coordinator data available for calculation")
-            return {
-                "import_cost": 0.0,
-                "export_credit": 0.0,
-                "excess_export_kwh": 0.0,
-                "net_bill": 0.0
-            }
-            
+            return dict(EMPTY_COMPONENTS)
+
         data = coordinator_data
         tariff = data.get("tariff_a", {})
         if not tariff:
             _LOGGER.error("Missing tariff_a configuration")
-            return {
-                "import_cost": 0.0,
-                "export_credit": 0.0,
-                "excess_export_kwh": 0.0,
-                "net_bill": 0.0
-            }
-            
+            return dict(EMPTY_COMPONENTS)
+
+        if current_time is None:
+            current_time = dt_util.now()
+
         charges = tariff.get("charges", {})
         afa = data.get("afa", {})
         eei = data.get("eei", {})
         tax_config = data.get("tax", {})
-        
+
         # Calculate total import based on tariff type
         if self._tariff_type == TARIFF_TOU:
             total_import = self._peak_kwh + self._offpeak_kwh
         else:
             total_import = self._total_kwh
-        
+
         # --- 1. Calculate Import Cost Components ---
-        
+
         # Energy Charge
         energy_cost, peak_rate, offpeak_rate, rate = calculate_energy_cost(
             self._peak_kwh,
@@ -419,26 +387,27 @@ class TNBEnergyTracker:
             tariff,
             self._tariff_type
         )
-        
+
         # Variable Charges (capacity + network)
         capacity_rate = Decimal(str(charges.get("capacity", 0)))
         network_rate = Decimal(str(charges.get("network", 0)))
         variable_rate = capacity_rate + network_rate
-        
+
         capacity_charge = total_import * (capacity_rate / 100)
         network_charge = total_import * (network_rate / 100)
         total_variable_cost = capacity_charge + network_charge
-        
+
         # Retail Charge
         retail_charge = calculate_retail_charge(total_import, charges)
-        
-        # AFA Charge
-        current_month_key = dt_util.now().strftime("%Y-%m")
-        afa_cost = calculate_afa_charge(total_import, afa, current_month_key)
-        
+
+        # AFA Charge (pro-rated across calendar months in the billing period)
+        current_month_key = current_time.strftime("%Y-%m")
+        month_weights = calculate_month_weights(self._calculate_period_start(current_time), current_time)
+        afa_cost = calculate_afa_charge(total_import, afa, current_month_key, month_weights)
+
         # EEI Rebate
         eei_rebate = calculate_eei_rebate(total_import, eei)
-        
+
         # KWTBB Tax (calculated on energy-related charges only: Energy + Variable + EEI)
         # Excludes Retail and AFA charges
         kwtbb_base = energy_cost + total_variable_cost + eei_rebate
@@ -447,30 +416,30 @@ class TNBEnergyTracker:
             kwtbb_base,
             tax_config.get("kwtbb", {})
         )
-        
+
         # Base Bill (before taxes, includes all charges)
         base_bill_amount = energy_cost + total_variable_cost + retail_charge + afa_cost + eei_rebate
-        
+
         # Service Tax
         service_tax_cost = calculate_service_tax(
             total_import,
             base_bill_amount,
             tax_config.get("service_tax", {})
         )
-        
+
         # Total Import Cost
         total_import_cost = base_bill_amount + kwtbb_cost + service_tax_cost
-        
+
         _LOGGER.debug(
             "Import cost breakdown: energy=%.2f, capacity=%.2f, network=%.2f, retail=%.2f, afa=%.2f, eei=%.2f, kwtbb=%.2f, service_tax=%.2f, total=%.2f",
             energy_cost, capacity_charge, network_charge, retail_charge, afa_cost, eei_rebate, kwtbb_cost, service_tax_cost, total_import_cost
         )
-        
+
         # --- 2. Calculate Export Credit (including NEM balance) ---
-        
+
         # Combine current month export with NEM balance from previous months
         effective_export = self._export_kwh + self._nem_balance
-        
+
         # Export credit calculation will determine EEI rate internally based on import usage
         credit_value, matched_peak, matched_offpeak, excess_export = calculate_export_credit(
             self._peak_kwh,
@@ -484,12 +453,12 @@ class TNBEnergyTracker:
             rate,
             eei
         )
-        
+
         _LOGGER.debug(
             "Export credit: current_export=%.2f kWh, nem_balance=%.2f kWh, effective_export=%.2f kWh, matched_peak=%.2f kWh, matched_offpeak=%.2f kWh, excess=%.2f kWh, credit=%.2f RM",
             self._export_kwh, self._nem_balance, effective_export, matched_peak, matched_offpeak, excess_export, credit_value
         )
-        
+
         return {
             "import_cost": total_import_cost,
             "energy_cost": energy_cost,
@@ -509,11 +478,14 @@ class TNBEnergyTracker:
 class TNBRatesCoordinator(DataUpdateCoordinator):
     """Class to manage fetching TNB Rates data."""
 
-    def __init__(self, hass: HomeAssistant, remote_url: str):
+    def __init__(self, hass: HomeAssistant, entry_id: str, remote_url: str):
         """Initialize."""
         self.remote_url = remote_url
         self.energy_tracker = None  # Will be set by __init__.py after config is loaded
         self._listener_removers = []  # Track listener cleanup functions
+        self._components = None  # Cached cost components, cleared on every update
+        # Last good rates, used when the remote URL can't be reached
+        self._rates_store = Store(hass, RATES_STORAGE_VERSION, f"{DOMAIN}.{entry_id}.rates")
         super().__init__(
             hass,
             _LOGGER,
@@ -521,10 +493,27 @@ class TNBRatesCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(hours=12),
         )
 
+    @callback
+    def async_update_listeners(self) -> None:
+        """Drop cached cost components, then notify all sensors."""
+        self._components = None
+        super().async_update_listeners()
+
+    def get_components(self):
+        """Return cost components, calculated at most once per update."""
+        if not self.energy_tracker:
+            return dict(EMPTY_COMPONENTS)
+        if self._components is None:
+            self._components = self.energy_tracker.calculate_components(self.data)
+        return self._components
+
     def setup_listeners(self, import_sensor: str, export_sensor: str = None):
         """Set up state change listeners for import/export sensors."""
-        from homeassistant.helpers.event import async_track_state_change_event
-        
+        from homeassistant.helpers.event import (
+            async_track_state_change_event,
+            async_track_time_change,
+        )
+
         @callback
         def handle_import_change(event):
             """Handle import sensor state changes."""
@@ -535,7 +524,7 @@ class TNBRatesCoordinator(DataUpdateCoordinator):
             if self.energy_tracker.handle_import_change(new_state, old_state, self.data):
                 # Notify all coordinator listeners to update
                 self.async_update_listeners()
-        
+
         @callback
         def handle_export_change(event):
             """Handle export sensor state changes."""
@@ -546,18 +535,31 @@ class TNBRatesCoordinator(DataUpdateCoordinator):
             if self.energy_tracker.handle_export_change(new_state, old_state):
                 # Notify all coordinator listeners to update
                 self.async_update_listeners()
-        
+
+        @callback
+        def handle_midnight(now):
+            """Reset counters on the billing day even if no new readings arrive."""
+            if not self.energy_tracker:
+                return
+            self.energy_tracker.check_reset(now)
+            # Refresh anyway: the AFA pro-rating moves with the date
+            self.async_update_listeners()
+
         # Register listeners (only once per coordinator)
         self._listener_removers.append(
             async_track_state_change_event(self.hass, [import_sensor], handle_import_change)
         )
         _LOGGER.info("Registered import sensor listener: %s", import_sensor)
-        
+
         if export_sensor:
             self._listener_removers.append(
                 async_track_state_change_event(self.hass, [export_sensor], handle_export_change)
             )
             _LOGGER.info("Registered export sensor listener: %s", export_sensor)
+
+        self._listener_removers.append(
+            async_track_time_change(self.hass, handle_midnight, hour=0, minute=0, second=0)
+        )
 
     def remove_listeners(self):
         """Remove all state change listeners."""
@@ -566,17 +568,30 @@ class TNBRatesCoordinator(DataUpdateCoordinator):
         self._listener_removers.clear()
         _LOGGER.info("Removed all sensor listeners")
 
+    async def _async_fetch_rates(self):
+        """Download and sanity check the rates JSON."""
+        session = async_get_clientsession(self.hass)
+        async with asyncio.timeout(10):
+            async with session.get(self.remote_url) as response:
+                if response.status != 200:
+                    raise UpdateFailed(f"Error fetching rates: {response.status}")
+                data = await response.json(content_type=None)
+
+        if not isinstance(data, dict) or not data.get("tariff_a"):
+            raise UpdateFailed("Rates JSON is missing tariff_a")
+        return data
+
     async def _async_update_data(self):
-        """Fetch data from remote JSON."""
+        """Fetch data from remote JSON, falling back to the last good copy."""
         try:
-            async with async_timeout.timeout(10):
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(self.remote_url) as response:
-                        if response.status != 200:
-                            raise UpdateFailed(f"Error fetching rates: {response.status}")
-                        data = await response.json(content_type=None)
-                        _LOGGER.debug("Successfully fetched rates data from %s", self.remote_url)
-                        return data
-                        
+            data = await self._async_fetch_rates()
         except Exception as err:
-            raise UpdateFailed(f"Error communicating with API: {err}")
+            cached = self.data or await self._rates_store.async_load()
+            if cached:
+                _LOGGER.warning("Error fetching rates from %s, using last known rates: %s", self.remote_url, err)
+                return cached
+            raise UpdateFailed(f"Error communicating with API: {err}") from err
+
+        _LOGGER.debug("Successfully fetched rates data from %s", self.remote_url)
+        await self._rates_store.async_save(data)
+        return data

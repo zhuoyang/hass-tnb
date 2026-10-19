@@ -8,6 +8,7 @@ from custom_components.tnb_rates.calculations import (
     calculate_variable_charges,
     calculate_retail_charge,
     calculate_afa_charge,
+    calculate_month_weights,
     calculate_eei_rebate,
     calculate_eei_export_rate,
     calculate_kwtbb_tax,
@@ -261,6 +262,46 @@ class TestAFACharge:
         charge = calculate_afa_charge(Decimal("1000"), afa_config, "2099-12")
         # Should use fallback rate
         assert charge >= 0
+        
+    def test_afa_prorated_across_months(self):
+        """Test AFA rate is weighted by days when the period spans two months."""
+        afa_config = {"waiver_limit": 600, "rates": {"2025-10": -6.0, "2025-11": -9.0}}
+        weights = {"2025-10": Decimal("0.5"), "2025-11": Decimal("0.5")}
+        
+        charge = calculate_afa_charge(Decimal("1000"), afa_config, "2025-11", weights)
+        
+        # Blended rate -7.5 sen/kWh
+        assert charge == Decimal("-75.0")
+        
+    def test_afa_single_month_weight_matches_lookup(self, afa_config):
+        """Test a period within one month gives the plain monthly rate."""
+        weighted = calculate_afa_charge(Decimal("1000"), afa_config, "2025-11", {"2025-11": Decimal("1")})
+        plain = calculate_afa_charge(Decimal("1000"), afa_config, "2025-11")
+        
+        assert weighted == plain
+
+
+class TestMonthWeights:
+    """Test splitting a billing period into calendar months."""
+    
+    def test_single_month(self):
+        """Test a period entirely within one month."""
+        weights = calculate_month_weights(datetime(2025, 10, 1), datetime(2025, 10, 20, 15, 0))
+        assert weights == {"2025-10": Decimal("1")}
+        
+    def test_spans_two_months(self):
+        """Test day shares when the period crosses a month boundary."""
+        # Oct 15-31 = 17 days, Nov 1-3 = 3 days
+        weights = calculate_month_weights(datetime(2025, 10, 15), datetime(2025, 11, 3, 8, 0))
+        
+        assert weights["2025-10"] == Decimal(17) / Decimal(20)
+        assert weights["2025-11"] == Decimal(3) / Decimal(20)
+        assert sum(weights.values()) == Decimal("1")
+        
+    def test_spans_year_end(self):
+        """Test a period crossing into January."""
+        weights = calculate_month_weights(datetime(2025, 12, 20), datetime(2026, 1, 9))
+        assert set(weights) == {"2025-12", "2026-01"}
 
 
 class TestEEIRebate:

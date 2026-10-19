@@ -18,12 +18,12 @@ class TestRestorationFlag:
         assert state["total_kwh"] == 0.0
         assert state["export_kwh"] == 0.0
 
-    def test_mark_as_restored(self, hass_mock):
+    def test_finish_restoration(self, hass_mock):
         """Test marking tracker as restored."""
         tracker = TNBEnergyTracker(hass_mock, billing_day=15, tariff_type="Time of Use")
         
         assert not tracker.is_restored()
-        tracker.mark_as_restored()
+        tracker.finish_restoration()
         assert tracker.is_restored()
 
     def test_restored_after_state_restoration(self, hass_mock):
@@ -42,7 +42,7 @@ class TestRestorationFlag:
         assert not tracker.is_restored()
         
         # Mark as restored
-        tracker.mark_as_restored()
+        tracker.finish_restoration()
         assert tracker.is_restored()
         
         # Verify values are preserved
@@ -59,7 +59,7 @@ class TestRestorationFlag:
         tracker = TNBEnergyTracker(hass_mock, billing_day=15, tariff_type="Standard")
         
         # Mark as restored
-        tracker.mark_as_restored()
+        tracker.finish_restoration()
         assert tracker.is_restored()
         
         # Process some updates (must use Decimal for internal processing)
@@ -78,7 +78,7 @@ class TestRestorationFlag:
         # On fresh install, sensors won't find prior state
         # So they'll immediately mark as restored with zero values
         assert not tracker.is_restored()
-        tracker.mark_as_restored()
+        tracker.finish_restoration()
         assert tracker.is_restored()
         
         # Values should still be zero but now marked as valid

@@ -10,47 +10,33 @@ from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 class TestStateRestoration:
     """Test state restoration functionality."""
     
-    def test_restore_state_valid_values(self, energy_tracker):
-        """Test restoring state with valid values."""
-        last_reset = datetime(2025, 1, 1, 0, 0, 0)
-        energy_tracker.restore_state(100.0, 200.0, 300.0, 50.0, last_reset)
+    def test_finish_restoration_marks_restored(self, energy_tracker_tou):
+        """Test that finishing restoration reconciles ToU total and marks restored."""
+        energy_tracker_tou.set_peak_kwh(100.0)
+        energy_tracker_tou.set_offpeak_kwh(200.0)
+        energy_tracker_tou.set_last_reset(datetime.now())
+        
+        energy_tracker_tou.finish_restoration()
+        
+        assert energy_tracker_tou.is_restored()
+        assert energy_tracker_tou._total_kwh == Decimal("300.0")
+        
+    def test_finish_restoration_resets_after_offline_cycle_change(self, energy_tracker):
+        """Test that a billing cycle passed while offline is processed on restore."""
+        energy_tracker.set_total_kwh(300.0)
+        energy_tracker.set_last_reset(datetime.now() - timedelta(days=45))
+        
+        energy_tracker.finish_restoration()
+        
+        assert energy_tracker._total_kwh == Decimal("0.0")
+        
+    def test_last_readings_in_state(self, energy_tracker):
+        """Test that restored meter readings are exposed for persistence."""
+        energy_tracker.set_last_readings(1234.5, 67.8)
         
         state = energy_tracker.get_state()
-        assert state["peak_kwh"] == 100.0
-        assert state["offpeak_kwh"] == 200.0
-        assert state["total_kwh"] == 300.0
-        assert state["export_kwh"] == 50.0
-        assert state["last_reset"] == last_reset
-        
-    def test_restore_state_clamps_negative(self, energy_tracker):
-        """Test that negative values are clamped to 0."""
-        last_reset = datetime(2025, 1, 1, 0, 0, 0)
-        energy_tracker.restore_state(-10.0, -20.0, -30.0, -5.0, last_reset)
-        
-        state = energy_tracker.get_state()
-        assert state["peak_kwh"] == 0.0
-        assert state["offpeak_kwh"] == 0.0
-        assert state["total_kwh"] == 0.0
-        assert state["export_kwh"] == 0.0
-        
-    def test_restore_state_clamps_excessive(self, energy_tracker):
-        """Test that excessive values are clamped to 100,000."""
-        last_reset = datetime(2025, 1, 1, 0, 0, 0)
-        energy_tracker.restore_state(200000.0, 150000.0, 120000.0, 120000.0, last_reset)
-        
-        state = energy_tracker.get_state()
-        assert state["peak_kwh"] == 100000.0
-        assert state["offpeak_kwh"] == 100000.0
-        assert state["total_kwh"] == 100000.0
-        assert state["export_kwh"] == 100000.0
-        
-    def test_restore_state_preserves_last_reset(self, energy_tracker):
-        """Test that last_reset date is preserved."""
-        last_reset = datetime(2025, 2, 15, 10, 30, 45)
-        energy_tracker.restore_state(50.0, 75.0, 100.0, 25.0, last_reset)
-        
-        state = energy_tracker.get_state()
-        assert state["last_reset"] == last_reset
+        assert state["last_import_reading"] == 1234.5
+        assert state["last_export_reading"] == 67.8
 
 
 class TestSetMethods:
@@ -190,11 +176,8 @@ class TestBillingCycleReset:
 class TestSensorResetDetection:
     """Test sensor reset detection logic."""
     
-    @pytest.mark.skip(reason="Requires full Home Assistant @callback decorator support")
     def test_import_sensor_normal_increase(self, energy_tracker_tou, coordinator_data, mock_state_factory):
         """Test normal import sensor increase."""
-        # Note: This test requires Home Assistant's @callback decorator to work properly
-        # The underlying logic is tested via test_process_import_delta_* tests
         # Set the last known state directly
         energy_tracker_tou._last_import_state = 100.0
         
@@ -208,11 +191,8 @@ class TestSensorResetDetection:
         total = energy_tracker_tou._peak_kwh + energy_tracker_tou._offpeak_kwh
         assert total == pytest.approx(5.0, rel=1e-2)
         
-    @pytest.mark.skip(reason="Requires full Home Assistant @callback decorator support")
     def test_import_sensor_reset_detected(self, energy_tracker_tou, coordinator_data, mock_state_factory):
         """Test import sensor reset detection (new value < threshold)."""
-        # Note: This test requires Home Assistant's @callback decorator to work properly
-        # The sensor reset detection logic is tested at the unit level elsewhere
         # Set the last known state directly
         energy_tracker_tou._last_import_state = 1000.0
         
@@ -237,11 +217,8 @@ class TestSensorResetDetection:
         # Should ignore the decrease, counters unchanged
         assert energy_tracker_tou._peak_kwh == Decimal("100.0")
         
-    @pytest.mark.skip(reason="Requires full Home Assistant @callback decorator support")
     def test_export_sensor_reset_detected(self, energy_tracker, mock_state_factory):
         """Test export sensor reset detection."""
-        # Note: This test requires Home Assistant's @callback decorator to work properly
-        # Export handling logic is well covered by other tests
         # Set the last known state directly
         energy_tracker._last_export_state = 500.0
         
@@ -285,6 +262,54 @@ class TestSensorResetDetection:
         
         # Should not process invalid value, peak unchanged
         assert energy_tracker._peak_kwh == initial_peak
+
+
+class TestMeterBaseline:
+    """Test that energy is counted from the last seen reading."""
+    
+    def test_import_counted_across_unavailable(self, energy_tracker, coordinator_data, mock_state_factory):
+        """Energy used while the meter was unavailable is counted when it returns."""
+        energy_tracker.handle_import_change(mock_state_factory(100.0), mock_state_factory(99.0), coordinator_data)
+        energy_tracker.handle_import_change(mock_state_factory(STATE_UNAVAILABLE), mock_state_factory(100.0), coordinator_data)
+        
+        # Back online: old_state is unavailable, but the last reading was 100
+        energy_tracker.handle_import_change(mock_state_factory(112.5), mock_state_factory(STATE_UNAVAILABLE), coordinator_data)
+        
+        assert energy_tracker._total_kwh == Decimal("13.5")  # 1 + 12.5
+        
+    def test_import_counted_after_restart(self, energy_tracker, coordinator_data, mock_state_factory):
+        """A restored baseline counts energy used while HA was down."""
+        energy_tracker.set_last_readings(import_reading=500.0)
+        
+        # First event after restart has no old_state
+        energy_tracker.handle_import_change(mock_state_factory(520.0), None, coordinator_data)
+        
+        assert energy_tracker._total_kwh == Decimal("20.0")
+        
+    def test_first_reading_sets_baseline(self, energy_tracker, coordinator_data, mock_state_factory):
+        """With no baseline at all, the first reading only sets the baseline."""
+        assert not energy_tracker.handle_import_change(mock_state_factory(500.0), None, coordinator_data)
+        
+        assert energy_tracker._total_kwh == Decimal("0.0")
+        assert energy_tracker._last_import_state == 500.0
+        
+    def test_export_counted_across_unavailable(self, energy_tracker, mock_state_factory):
+        """Export used while the meter was unavailable is counted when it returns."""
+        energy_tracker.set_last_readings(export_reading=40.0)
+        
+        energy_tracker.handle_export_change(mock_state_factory(46.0), mock_state_factory(STATE_UNKNOWN))
+        
+        assert energy_tracker._export_kwh == Decimal("6.0")
+
+
+class TestSetValues:
+    """Test manual corrections via set_values."""
+    
+    def test_set_values_tou_reconciles_total(self, energy_tracker_tou):
+        """Setting peak/offpeak in ToU keeps total = peak + offpeak."""
+        energy_tracker_tou.set_values(peak_kwh=40.0, offpeak_kwh=60.0)
+        
+        assert energy_tracker_tou._total_kwh == Decimal("100.0")
 
 
 class TestProcessImportDelta:

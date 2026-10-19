@@ -8,7 +8,7 @@
                     "name": "Name",
                     "import_sensor": "Import Sensor (Cumulative kWh)",
                     "export_sensor": "Export Sensor (Cumulative kWh, Optional)",
-                    "billing_day": "Billing Cycle Reset Day (1-31)",
+                    "billing_day": "Billing Cycle Reset Day (1-28)",
                     "tariff_type": "Tariff Type",
                     "remote_url": "Remote Rates JSON URL"
                 }
@@ -29,7 +29,7 @@
                 "title": "TNB Rates Options",
                 "data": {
                     "remote_url": "Remote Rates JSON URL",
-                    "billing_day": "Billing Cycle Reset Day"
+                    "billing_day": "Billing Cycle Reset Day (1-28)"
                 }
             }
         }

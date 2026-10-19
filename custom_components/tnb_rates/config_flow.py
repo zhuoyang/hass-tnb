@@ -16,6 +16,7 @@ from .const import (
     TARIFF_STANDARD,
     TARIFF_TOU,
     DEFAULT_REMOTE_URL,
+    MAX_BILLING_DAY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class TNBRatesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_EXPORT_SENSOR): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor", device_class="energy")
                     ),
-                    vol.Required(CONF_BILLING_DAY, default=1): vol.All(vol.Coerce(int), vol.Range(min=1, max=31)),
+                    vol.Required(CONF_BILLING_DAY, default=1): vol.All(vol.Coerce(int), vol.Range(min=1, max=MAX_BILLING_DAY)),
                     vol.Required(CONF_TARIFF_TYPE, default=TARIFF_STANDARD): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[TARIFF_STANDARD, TARIFF_TOU],
@@ -62,15 +63,11 @@ class TNBRatesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry):
         """Get the options flow for this handler."""
-        return TNBRatesOptionsFlowHandler(config_entry)
+        return TNBRatesOptionsFlowHandler()
 
 
 class TNBRatesOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options."""
-
-    def __init__(self, config_entry):
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -92,7 +89,7 @@ class TNBRatesOptionsFlowHandler(config_entries.OptionsFlow):
                         default=self.config_entry.options.get(
                             CONF_BILLING_DAY, self.config_entry.data.get(CONF_BILLING_DAY, 1)
                         ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=31)),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=MAX_BILLING_DAY)),
                 }
             ),
         )

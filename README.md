@@ -13,7 +13,7 @@ A custom component for Home Assistant that tracks electricity costs in Malaysia 
     *   **Energy Charge**: Cost of electricity consumed (split by Peak/Off-Peak for ToU).
     *   **Service Tax (SST)**: Automatically calculates 8% tax for usage above 600kWh.
     *   **KWTBB (RE Fund)**: Calculates the 1.6% Renewable Energy Fund contribution.
-    *   **AFA**: Calculates the Automatic Fuel Adjustment, rates is set in rates.json file and will be updated regularly.
+    *   **AFA**: Calculates the Automatic Fuel Adjustment, rates is set in rates.json file and will be updated regularly. When a billing cycle spans two calendar months, the AFA rate is pro-rated by the days in each month.
     *   **Minimum Charge**: Enforces the minimum monthly charge (RM 3.00).
 *   **Configurable Billing Cycle**: Set the day of the month your bill resets.
 *   **Remote Rates Update**: Fetches the latest tariff rates from a remote JSON file, ensuring your rates are always up to date without needing to update the component code.
@@ -46,7 +46,7 @@ A custom component for Home Assistant that tracks electricity costs in Malaysia 
     *   **Name**: Give your sensor a name (e.g., "TNB Bill").
     *   **Import Sensor**: Select your total energy import sensor (kWh). This should be an increasing counter (total_increasing).
     *   **Export Sensor** (Optional): Select your total energy export sensor (kWh) if you have solar.
-    *   **Billing Day**: The day of the month your TNB bill cycle starts (e.g., 1 for the 1st of the month).
+    *   **Billing Day**: The day of the month your TNB bill cycle starts (1-28, e.g., 1 for the 1st of the month). Can be changed later under the integration's options without a restart.
     *   **Tariff Type**: Select "Standard" or "Time of Use".
     *   **Remote URL**: The URL to the `rates.json` file. You can leave the default or point to your own if you want to customize rates.
 
@@ -70,9 +70,12 @@ The sensor provides detailed attributes for your dashboard:
 Allows you to manually override the accumulated energy values for the current billing cycle. This is useful if the sensor gets out of sync or you need to correct it based on your actual bill.
 
 **Parameters:**
+*   `config_entry_id`: (Optional) Which TNB Rates entry to update. Required when more than one is set up.
+*   `total_kwh`: (Optional) Accumulated Total Energy (kWh), Standard tariff only.
 *   `peak_kwh`: (Optional) Accumulated Peak Energy (kWh).
 *   `offpeak_kwh`: (Optional) Accumulated Off-Peak Energy (kWh).
 *   `export_kwh`: (Optional) Accumulated Export Energy (kWh).
+*   `nem_balance_kwh`: (Optional) NEM balance carried over from previous billing cycles (kWh).
 
 ## License
 

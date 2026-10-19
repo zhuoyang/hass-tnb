@@ -6,22 +6,14 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorStateClass,
 )
-from homeassistant.const import (
-    UnitOfEnergy,
-    STATE_UNAVAILABLE,
-    STATE_UNKNOWN,
-)
-from homeassistant.core import callback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.const import UnitOfEnergy
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
     CONF_IMPORT_SENSOR,
     CONF_EXPORT_SENSOR,
-    SERVICE_SET_ENERGY_VALUES,
     TARIFF_STANDARD,
     TARIFF_TOU,
 )
@@ -55,34 +47,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     
     async_add_entities(entities)
 
-    async def handle_set_energy_values(call):
-        """Handle the set_energy_values service call."""
-        peak_kwh = call.data.get("peak_kwh")
-        offpeak_kwh = call.data.get("offpeak_kwh")
-        total_kwh = call.data.get("total_kwh")
-        export_kwh = call.data.get("export_kwh")
-        nem_balance_kwh = call.data.get("nem_balance_kwh")
-        
-        # Get coordinator for all config entries and update
-        for entry_id, coordinator_instance in hass.data[DOMAIN].items():
-            if hasattr(coordinator_instance, 'energy_tracker') and coordinator_instance.energy_tracker:
-                coordinator_instance.energy_tracker.set_values(peak_kwh, offpeak_kwh, total_kwh, export_kwh, nem_balance_kwh)
-                coordinator_instance.async_update_listeners()
-                _LOGGER.info("Energy values updated for entry %s", entry_id)
-    
-    # Register service (only once per domain)
-    if not hass.services.has_service(DOMAIN, SERVICE_SET_ENERGY_VALUES):
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_SET_ENERGY_VALUES,
-            handle_set_energy_values,
-        )
-
 
 class TNBRatesBaseSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
     """Base class for TNB Rates Sensors."""
 
     _attr_has_entity_name = True
+    # Value starts again from zero each billing cycle (exposed via last_reset)
+    _resets_each_cycle = True
 
     def __init__(self, hass, coordinator, config_entry):
         """Initialize the sensor."""
@@ -117,16 +88,16 @@ class TNBRatesBaseSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
         # 6-8x overcounting of energy usage.
         # The coordinator.setup_listeners() is called from __init__.py
 
+    @property
+    def last_reset(self):
+        """Return the start of the current billing cycle for long-term statistics."""
+        if not self._resets_each_cycle or not self.coordinator.energy_tracker:
+            return None
+        return self.coordinator.energy_tracker.get_state()["last_reset"]
+
     def _get_components(self):
         """Get calculated cost components from coordinator."""
-        if not self.coordinator.energy_tracker:
-            return {
-                "import_cost": 0.0,
-                "export_credit": 0.0,
-                "excess_export_kwh": 0.0,
-                "net_bill": 0.0
-            }
-        return self.coordinator.energy_tracker.calculate_components(self.coordinator.data)
+        return self.coordinator.get_components()
 
 
 class TNBRatesBillSensor(TNBRatesBaseSensor):
@@ -166,11 +137,6 @@ class TNBRatesBillSensor(TNBRatesBaseSensor):
             "total_export_credit": float(round(components.get("export_credit", 0.0), 2)),
         })
         
-        # Add last reset info
-        if self.coordinator.energy_tracker:
-            state = self.coordinator.energy_tracker.get_state()
-            attrs["last_reset"] = state["last_reset"].isoformat() if state["last_reset"] else None
-            
         return attrs
 
 
@@ -192,15 +158,6 @@ class TNBRatesImportCostSensor(TNBRatesBaseSensor):
         components = self._get_components()
         return float(round(components.get("import_cost", 0.0), 2))
 
-    @property
-    def extra_state_attributes(self):
-        """Return the state attributes."""
-        attrs = {}
-        if self.coordinator.energy_tracker:
-            state = self.coordinator.energy_tracker.get_state()
-            attrs["last_reset"] = state["last_reset"].isoformat() if state["last_reset"] else None
-        return attrs
-
 
 class TNBRatesExportCreditSensor(TNBRatesBaseSensor):
     """Sensor for the Export Credit Value."""
@@ -220,23 +177,15 @@ class TNBRatesExportCreditSensor(TNBRatesBaseSensor):
         components = self._get_components()
         return float(round(components.get("export_credit", 0.0), 2))
 
-    @property
-    def extra_state_attributes(self):
-        """Return the state attributes."""
-        attrs = {}
-        if self.coordinator.energy_tracker:
-            state = self.coordinator.energy_tracker.get_state()
-            attrs["last_reset"] = state["last_reset"].isoformat() if state["last_reset"] else None
-        return attrs
-
 
 class TNBRatesExcessExportSensor(TNBRatesBaseSensor):
     """Sensor for Excess Export Energy."""
     
     _attr_name = "Excess Export"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_device_class = SensorDeviceClass.ENERGY
+    # No energy device class: it only allows total/total_increasing state classes
     _attr_state_class = SensorStateClass.MEASUREMENT  # Point-in-time measurement, not cumulative
+    _resets_each_cycle = False
 
     @property
     def native_value(self):
@@ -265,29 +214,38 @@ class TNBRatesEnergySensor(TNBRatesBaseSensor):
             try:
                 val = float(last_state.state)
                 self._restore_to_tracker(val)
-                
-                # Restore last_reset from attributes (only from Total Energy sensor to avoid duplicates)
-                if isinstance(self, TNBRatesTotalEnergySensor) and last_state.attributes:
-                    last_reset_iso = last_state.attributes.get("last_reset_iso")
-                    if last_reset_iso and self.coordinator.energy_tracker:
-                        try:
-                            from datetime import datetime
-                            last_reset = datetime.fromisoformat(last_reset_iso)
-                            self.coordinator.energy_tracker.set_last_reset(last_reset)
-                            _LOGGER.info("Restored last_reset: %s", last_reset)
-                        except (ValueError, TypeError) as err:
-                            _LOGGER.warning("Failed to restore last_reset: %s", err)
-                
             except (ValueError, TypeError):
                 pass
+
+            # Restore shared tracker state (only from Total Energy sensor to avoid duplicates)
+            if isinstance(self, TNBRatesTotalEnergySensor) and last_state.attributes:
+                self._restore_tracker_attributes(last_state.attributes)
         
-        # Register this sensor as restored (centralized coordination)
-        # The tracker will reconcile and mark as fully restored when all sensors complete
-        if self.coordinator.energy_tracker:
-            is_complete = self.coordinator.energy_tracker.register_sensor_restored()
-            if is_complete:
-                # All sensors restored - trigger UI update
-                self.coordinator.async_update_listeners()
+        # The tracker is marked restored by __init__.py once all sensors are added
+
+    def _restore_tracker_attributes(self, attributes):
+        """Restore last_reset and meter baselines saved as state attributes."""
+        tracker = self.coordinator.energy_tracker
+        if not tracker:
+            return
+        
+        last_reset_iso = attributes.get("last_reset_iso")
+        if last_reset_iso:
+            try:
+                from datetime import datetime
+                last_reset = datetime.fromisoformat(last_reset_iso)
+                tracker.set_last_reset(last_reset)
+                _LOGGER.info("Restored last_reset: %s", last_reset)
+            except (ValueError, TypeError) as err:
+                _LOGGER.warning("Failed to restore last_reset: %s", err)
+        
+        try:
+            tracker.set_last_readings(
+                attributes.get("last_import_reading"),
+                attributes.get("last_export_reading"),
+            )
+        except (ValueError, TypeError) as err:
+            _LOGGER.warning("Failed to restore last meter readings: %s", err)
 
     @property
     def extra_state_attributes(self):
@@ -353,13 +311,13 @@ class TNBRatesTotalEnergySensor(TNBRatesEnergySensor):
 
     @property
     def extra_state_attributes(self):
-        """Return extra state attributes including last_reset for persistence."""
+        """Return extra state attributes, including meter baselines for persistence."""
         attrs = super().extra_state_attributes or {}
         if self.coordinator.energy_tracker:
             state = self.coordinator.energy_tracker.get_state()
-            # Add last_reset in human-readable format
-            if state.get("last_reset"):
-                attrs["last_reset"] = state["last_reset"].isoformat()
+            for key in ("last_import_reading", "last_export_reading"):
+                if state.get(key) is not None:
+                    attrs[key] = state[key]
         return attrs
 
     def _restore_to_tracker(self, value):
@@ -387,6 +345,7 @@ class TNBRatesExportEnergySensor(TNBRatesEnergySensor):
 class TNBRatesNEMBalanceSensor(TNBRatesEnergySensor):
     """Sensor for NEM Balance."""
     _attr_name = "NEM Balance"
+    _resets_each_cycle = False  # Carries over between billing cycles
 
     @property
     def native_value(self):
